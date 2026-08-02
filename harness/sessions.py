@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 VALID_TYPES = {"user", "assistant", "tool_call", "tool_result", "error", "meta"}
 
@@ -21,8 +20,12 @@ def get_store_dir() -> Path:
 
 
 def new_session_id() -> str:
-    """A session id unique to the second: `%Y%m%d-%H%M%S`."""
-    return time.strftime("%Y%m%d-%H%M%S")
+    """A session id unique to the microsecond: `%Y%m%d-%H%M%S-%f`.
+
+    Second-granularity ids let two runs in the same second silently share a
+    JSONL file; the microsecond suffix keeps ids collision-free in practice.
+    """
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
 
 def _session_path(session_id: str) -> Path:
@@ -78,6 +81,39 @@ def _event_to_wire(record: dict) -> dict | None:
     return None  # tool_call, error, meta carry no replayable message
 
 
+def _iter_records(path: Path) -> Iterator[dict]:
+    """Yield the JSON records of a session file, one per line.
+
+    The single tolerant JSONL reader: blank lines and corrupt (non-JSON) lines
+    are skipped, and a file that cannot be opened (gone, permissions) simply
+    yields nothing. Callers must not rely on the file existing first.
+    """
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError:
+        return
+    with handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def read_events(session_id: str) -> list[dict]:
+    """Raw JSONL records `{"ts", "type", "data"}` for a session, in file order.
+
+    A missing session file yields []; blank and corrupt lines are skipped.
+    """
+    path = _session_path(session_id)
+    if not path.exists():
+        return []
+    return list(_iter_records(path))
+
+
 def load_messages(session_id: str) -> list[dict]:
     """Replay a session as OpenAI wire dicts in file order.
 
@@ -85,22 +121,11 @@ def load_messages(session_id: str) -> list[dict]:
     assistant event). A missing session file yields []; corrupt JSON lines are
     skipped.
     """
-    path = _session_path(session_id)
-    if not path.exists():
-        return []
     messages: list[dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            wire = _event_to_wire(record)
-            if wire is not None:
-                messages.append(wire)
+    for record in read_events(session_id):
+        wire = _event_to_wire(record)
+        if wire is not None:
+            messages.append(wire)
     return messages
 
 
@@ -117,26 +142,46 @@ def list_sessions() -> list[dict]:
     for path in sorted(store.glob("*.jsonl"), key=lambda p: p.stem):
         first_ts: str | None = None
         first_prompt: str | None = None
-        try:
-            handle = path.open("r", encoding="utf-8")
-        except OSError:
-            continue
-        with handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if first_ts is None and record.get("ts"):
-                    first_ts = record["ts"]
-                if first_prompt is None and record.get("type") == "user":
-                    data = record.get("data")
-                    if isinstance(data, dict) and data.get("content"):
-                        first_prompt = data["content"]
-                if first_ts is not None and first_prompt is not None:
-                    break
+        for record in _iter_records(path):
+            if first_ts is None and record.get("ts"):
+                first_ts = record["ts"]
+            if first_prompt is None and record.get("type") == "user":
+                data = record.get("data")
+                if isinstance(data, dict) and data.get("content"):
+                    first_prompt = data["content"]
+            if first_ts is not None and first_prompt is not None:
+                break
         sessions.append({"id": path.stem, "ts": first_ts, "prompt": first_prompt})
     return sessions
+
+
+def delete_session(session_id: str) -> bool:
+    """Delete `<store>/<id>.jsonl`; True if the file existed.
+
+    Only ever removes the session's own file — never other files.
+    """
+    path = _session_path(session_id)
+    if not path.is_file():
+        return False
+    path.unlink()
+    return True
+
+
+def prune_sessions(keep: int = 20) -> list[str]:
+    """Delete all session files except the newest `keep`, sorted by id.
+
+    Returns the deleted session ids in deletion order. `keep <= 0` deletes
+    every session file.
+    """
+    store = get_store_dir()
+    if not store.is_dir():
+        return []
+    paths = sorted(store.glob("*.jsonl"), key=lambda p: p.stem)
+    deleted: list[str] = []
+    for path in paths[: max(0, len(paths) - keep)]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue  # vanished between listing and unlink; nothing to report
+        deleted.append(path.stem)
+    return deleted

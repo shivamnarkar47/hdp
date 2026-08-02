@@ -154,5 +154,103 @@ class TestToolRegistry(unittest.TestCase):
             self.assertEqual(schema["function"]["parameters"]["type"], "object")
 
 
+    def test_read_range_on_huge_file(self):
+        # 100k lines: a range read must stream only the requested window.
+        content = "".join(f"line {i}\n" for i in range(1, 100_001))
+        self.make("huge.txt", content)
+        result = self.reg.execute("read", {"path": "huge.txt", "offset": 5, "limit": 3})
+        self.assertEqual(result, "line 5\nline 6\nline 7\n")
+        result = self.reg.execute("read", {"path": "huge.txt", "limit": 2})
+        self.assertEqual(result, "line 1\nline 2\n")
+
+    def test_edit_range_scoped_replacement(self):
+        # "needle" appears at line 2 AND line 9; a range-scoped edit must
+        # replace only the occurrence inside [9, 11), leaving line 2 intact.
+        self.make(
+            "r.txt",
+            "line1\nneedle\nline3\nline4\nline5\nline6\nline7\nline8\nneedle\nline10\n",
+        )
+        result = self.reg.execute(
+            "edit", {"path": "r.txt", "old_text": "needle", "new_text": "NINE", "offset": 9, "limit": 2}
+        )
+        self.assertTrue(result.startswith("edited r.txt"))
+        self.assertEqual(
+            (self.project / "r.txt").read_text(encoding="utf-8"),
+            "line1\nneedle\nline3\nline4\nline5\nline6\nline7\nline8\nNINE\nline10\n",
+        )
+
+    def test_grep_stops_scanning_at_cap(self):
+        # File A (visited first — root files precede subdirectories in walk
+        # order) matches thousands of lines, so the cap is hit inside it.
+        self.make("many.txt", "".join(f"needle {i}\n" for i in range(1, 3001)))
+        # File B sits after the cap would be reached; its matching line must
+        # never be scanned, so it must not appear in the result.
+        self.make("sub/sentinel.txt", "needle sentinel\n")
+        result = self.reg.execute("grep", {"pattern": "needle"})
+        self.assertLessEqual(len(result), MAX_RESULT_CHARS + len(TRUNCATED_SUFFIX))
+        self.assertTrue(result.endswith(TRUNCATED_SUFFIX))
+        self.assertTrue(result.startswith("many.txt:1: needle 1"))
+        self.assertNotIn("sentinel", result)
+
+    def test_read_no_limit_caps_at_10k(self):
+        # ~2M lines / ~20MB: a no-limit read must stop once it has enough
+        # characters to decide the cap applies, not read the whole file.
+        content = "".join(f"line {i}\n" for i in range(1, 2_000_001))
+        self.make("huge2.txt", content)
+        result = self.reg.execute("read", {"path": "huge2.txt"})
+        self.assertEqual(len(result), MAX_RESULT_CHARS + len(TRUNCATED_SUFFIX))
+        self.assertTrue(result.endswith(TRUNCATED_SUFFIX))
+        self.assertTrue(result.startswith("line 1\n"))
+        # offset without limit still honors the start line on the capped path.
+        tail = self.reg.execute("read", {"path": "huge2.txt", "offset": 1_999_999})
+        self.assertEqual(tail, "line 1999999\nline 2000000\n")
+
+    def test_edit_range_beyond_eof(self):
+        self.make("s.txt", "\n".join(f"line{i}" for i in range(1, 11)))
+        result = self.reg.execute(
+            "edit", {"path": "s.txt", "old_text": "line9", "new_text": "NINE", "offset": 90, "limit": 5}
+        )
+        self.assertEqual(result, "old_text not found")
+
+    def test_bash_sanitized_path(self):
+        result = self.reg.execute("bash", {"command": "echo $PATH"})
+        self.assertTrue(result.startswith("/"))
+        self.assertIn("/usr/bin", result)
+        self.assertEqual(result.strip().split(":"), ["/usr/local/bin", "/usr/bin", "/bin"])
+
+    def test_bash_sanitized_path_prepends_project_venv(self):
+        (self.project / ".venv" / "bin").mkdir(parents=True)
+        result = self.reg.execute("bash", {"command": "echo $PATH"})
+        expected = [str(self.project / ".venv" / "bin"), "/usr/local/bin", "/usr/bin", "/bin"]
+        self.assertEqual(result.strip().split(":"), expected)
+
+
+    def test_grep_stops_scanning_at_cap(self):
+        # File A (root level, visited first by os.walk): 3000 matching lines,
+        # ~40KB of matches — the result cap is hit inside this file.
+        self.make("many.txt", "".join(f"needle {i}\n" for i in range(1, 3001)))
+        # File B (subdirectory, walked after root files): its matching line must
+        # never be scanned once the cap is reached, so it cannot appear.
+        self.make("sub/sentinel.txt", "needle sentinel\n")
+        result = self.reg.execute("grep", {"pattern": "needle"})
+        self.assertLessEqual(len(result), MAX_RESULT_CHARS + len(TRUNCATED_SUFFIX))
+        self.assertTrue(result.endswith(TRUNCATED_SUFFIX))
+        self.assertTrue(result.startswith("many.txt:1: needle 1"))
+        self.assertNotIn("sentinel", result)
+
+    def test_read_no_limit_caps_at_10k(self):
+        # ~20MB / 2M lines: an unlimited read must fetch only the cap+slack
+        # prefix, still returning the exact same truncated result as before.
+        content = "".join(f"line {i}\n" for i in range(1, 2_000_001))
+        self.make("huge2.txt", content)
+        result = self.reg.execute("read", {"path": "huge2.txt"})
+        self.assertEqual(len(result), MAX_RESULT_CHARS + len(TRUNCATED_SUFFIX))
+        self.assertTrue(result.endswith(TRUNCATED_SUFFIX))
+        self.assertTrue(result.startswith("line 1\n"))
+        # offset without limit still honors the start line, then caps.
+        tail = self.reg.execute("read", {"path": "huge2.txt", "offset": 1_999_999})
+        self.assertEqual(tail, "line 1999999\nline 2000000\n")
+
+
 if __name__ == "__main__":
     unittest.main()

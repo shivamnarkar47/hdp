@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from harness import prompts, sessions
 from harness.config import CONTEXT_WINDOW, MAX_OUTPUT_TOKENS
-from harness.context import truncate_history
+from harness.context import estimate_tokens, truncate_history, wire_token_count
 from harness.dialect import DialectFeed
 from harness.messages import (
     AssistantMessage,
@@ -30,6 +30,10 @@ from harness.messages import (
     to_wire_messages,
 )
 from harness.tools import MAX_RESULT_CHARS, TRUNCATED_SUFFIX, ToolError
+
+# Prompt budget: the wire history must leave MAX_OUTPUT_TOKENS of headroom
+# for the model's reply (CONTEXT_WINDOW - MAX_OUTPUT_TOKENS == 616_000).
+PROMPT_BUDGET = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS
 
 
 class LoopError(Exception):
@@ -108,6 +112,7 @@ class AgentLoop:
         self._same_call_count = 0
         self._ran = False
         self.steps = 0
+        self.usage = {"input_tokens": 0, "output_tokens": 0}
 
     # -- public --------------------------------------------------------------
 
@@ -116,6 +121,7 @@ class AgentLoop:
         assert not self._ran, "run() may only be called once per AgentLoop instance"
         self._ran = True
         self.steps = 0
+        self.usage = {"input_tokens": 0, "output_tokens": 0}
 
         if self._structure is None:
             from harness.structure import StructureManager
@@ -187,10 +193,22 @@ class AgentLoop:
             structured_calls: list[ToolCall] = []
             finish_reason: str | None = None
 
+            # Preemptive truncation: if the full wire history would exceed the
+            # prompt budget, drop old turns BEFORE streaming — otherwise a full
+            # max-token turn is burned only to overflow on finish_reason ==
+            # "length" and truncate retroactively. The wire and its token count
+            # are computed once and reused for the budget check, usage
+            # accounting, and the call (re-derived only when truncated).
+            wire = to_wire_messages(self._messages)
+            wire_tokens = wire_token_count(wire)
+            if wire_tokens > PROMPT_BUDGET:
+                self._messages = truncate_history(self._messages, self._system, PROMPT_BUDGET)
+                wire = to_wire_messages(self._messages)
+                wire_tokens = wire_token_count(wire)
+            self.usage["input_tokens"] += wire_tokens
+
             feed = DialectFeed()
-            for kind, payload in self.gateway.stream(
-                to_wire_messages(self._messages), self.tools.schemas()
-            ):
+            for kind, payload in self.gateway.stream(wire, self.tools.schemas()):
                 if kind == "content":
                     for event in feed.feed(payload):
                         self._route(event, content_parts, reasoning_parts, healed_calls, emit)
@@ -226,6 +244,7 @@ class AgentLoop:
         # order is assistant-with-tool_calls, then tool results).
         content = "".join(content_parts)
         reasoning = "".join(reasoning_parts)
+        self.usage["output_tokens"] += estimate_tokens(content + reasoning)
         self._messages.append(AssistantMessage(content, reasoning or None, calls or None))
         sessions.append_event(
             self.session_id,
@@ -248,12 +267,15 @@ class AgentLoop:
 
         for call in calls:
             self._execute_one(call, emit)
-        # Tools (write/edit/bash) mutate the tree; refresh the structure cache
-        # cheaply (regenerates only when the signature changed).
-        try:
-            self._structure.refresh()
-        except OSError:
-            pass
+        # Only write/edit/bash mutate the tree; read/grep/glob never do, so
+        # skip the full-tree signature scan for them (measured ~30us/entry,
+        # up to ~0.5s at the 20k-entry cap).
+        mutated = any(call.name in ("write", "edit", "bash") for call in calls)
+        if mutated:
+            try:
+                self._structure.refresh()
+            except OSError:
+                pass
         return None
 
     @staticmethod

@@ -8,9 +8,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from harness.config import CONTEXT_WINDOW, MAX_OUTPUT_TOKENS
+from harness.context import wire_token_count
 from harness.loop import AgentLoop, LoopError
 from harness.memory import Memory
-from harness.sessions import load_messages
+from harness.sessions import append_event, load_messages
 from harness.tools import ToolRegistry
 
 # DSML envelope escape helpers (see harness/dialect.py).
@@ -190,6 +192,55 @@ class TestAgentLoop(unittest.TestCase):
         gateway = FakeGateway([("content", "hi"), ("done", "stop")])
         loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
         self.assertEqual(loop.run("Say hi"), "hi")
+
+    def test_preemptive_truncation_before_stream(self):
+        """A wire history over the prompt budget is truncated BEFORE streaming.
+
+        The huge user message is seeded as an old turn (user + assistant +
+        tool result) so the loop's own small prompt is the protected last user
+        message; truncate_history can then drop the oversized turn.
+        """
+        budget = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS
+        big = "x" * 700_000  # ~233k tokens per message; 3 messages blow past 616k
+        append_event(self.session_id, {"type": "user", "data": {"content": big}})
+        append_event(self.session_id, {"type": "assistant", "data": {"content": big}})
+        append_event(
+            self.session_id,
+            {"type": "tool_result", "data": {"tool_call_id": "t1", "content": big}},
+        )
+
+        gateway = FakeGateway([("content", "Wrote the file."), ("done", "stop")])
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id, resume=True)
+        answer = loop.run("finish")
+        self.assertEqual(answer, "Wrote the file.")
+
+        # The wire recorded on the very first stream() call was already
+        # truncated: it fits the budget and no longer carries the huge content.
+        recorded = gateway.calls[0][0]
+        self.assertLessEqual(wire_token_count(recorded), budget)
+        self.assertNotIn(big, json.dumps(recorded, ensure_ascii=False))
+        # Only one turn ran (single stream call), so usage reflects it.
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertGreater(loop.usage["input_tokens"], 0)
+        self.assertGreater(loop.usage["output_tokens"], 0)
+
+    def test_usage_accounting_two_turns(self):
+        """usage accumulates input+output tokens over a normal two-turn run."""
+        turn1 = [
+            ("reasoning", "Let me check the directory"),
+            ("content", "I will write the file. "),
+            ("content", DSML_WRITE),
+            ("done", "tool_calls"),
+        ]
+        turn2 = [("content", "Wrote hello.txt."), ("done", "stop")]
+        gateway = FakeGateway(turn1, turn2)
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
+        loop.run("Write the file")
+        self.assertGreater(loop.usage["input_tokens"], 0)
+        self.assertGreater(loop.usage["output_tokens"], 0)
+        self.assertEqual(loop.usage["input_tokens"], sum(
+            wire_token_count(calls[0]) for calls in gateway.calls
+        ))
 
 
 if __name__ == "__main__":

@@ -82,6 +82,14 @@ _SECTION_TAGS = tuple(
 )
 _INVOKE_TAGS = tuple(dict.fromkeys(_INVOKE_CLOSE + _PARAM_OPEN + _PARAM_CLOSE))
 
+# Every token in every parser state starts with "<", so any partial-token
+# suffix of a buffer must contain "<" within its last _MAX_TOKEN_PREFIX chars
+# (the longest proper token prefix). Chunks whose tail has no "<" cannot be
+# mid-token, so skip the O(tokens x prefix) suffix scan — ~35us to ~0.2us for
+# plain text. Sound: an overlap of length k equals token[:k], starts with
+# token[0] == "<" at len(text) - k, and k <= len(token) - 1 <= _MAX_TOKEN_PREFIX.
+_MAX_TOKEN_PREFIX = max(len(t) - 1 for t in (*_OUTSIDE_TOKENS, *_THINK_TOKENS, *_PARAM_CLOSE))
+
 _NAME_RE = re.compile(r'\sname="([^"]*)"')
 _STRING_RE = re.compile(r'\sstring="([^"]*)"')
 
@@ -118,6 +126,8 @@ def find_earliest_token(text: str, tokens: tuple[str, ...]) -> tuple[int, str] |
 
 def partial_suffix_overlap(text: str, tokens: tuple[str, ...]) -> int:
     """Longest suffix of ``text`` that is a proper prefix of any token."""
+    if not text or "<" not in text[-_MAX_TOKEN_PREFIX:]:
+        return 0
     best = 0
     for token in tokens:
         for k in range(min(len(text), len(token) - 1), 0, -1):

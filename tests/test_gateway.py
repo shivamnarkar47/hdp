@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import email.utils
+import http.client
 import io
+import time
 import unittest
+import urllib.error
 from unittest import mock
 
 from harness.config import MAX_OUTPUT_TOKENS
 from harness.gateway import (
     Gateway,
+    GatewayError,
     _build_body,
     _build_headers,
     _merge_tool_calls,
@@ -131,6 +136,148 @@ class TestStreamEvents(unittest.TestCase):
                 ("done", "tool_calls"),
             ],
         )
+
+
+class TestStreamRetryOn429(unittest.TestCase):
+    """HTTP 429 rate-limit handling: retry before content, never after."""
+
+    @staticmethod
+    def _http_429(retry_after: str | None = None) -> urllib.error.HTTPError:
+        hdrs = http.client.HTTPMessage()
+        if retry_after is not None:
+            hdrs["Retry-After"] = retry_after
+        return urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions",
+            429,
+            "Too Many Requests",
+            hdrs,
+            io.BytesIO(b"rate limited"),
+        )
+
+    @staticmethod
+    def _success_stream() -> io.BytesIO:
+        payload = (
+            'data: {"choices": [{"delta": {"content": "hi"}, "finish_reason": null}]}\n'
+            "\n"
+            "data: [DONE]\n"
+            "\n"
+        )
+        return io.BytesIO(payload.encode("utf-8"))
+
+    def test_429_retries_then_succeeds(self):
+        gateway = Gateway("https://example.test/v1", "sk-test", "deepseek-v4-flash")
+        sleeps: list[float] = []
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=[self._http_429(retry_after="2"), self._http_429(retry_after="2"), self._success_stream()],
+        ) as urlopen_mock, mock.patch(
+            "harness.gateway.time.sleep", side_effect=lambda s: sleeps.append(s)
+        ):
+            events = list(gateway.stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(events, [("content", "hi"), ("done", None)])
+        self.assertEqual(urlopen_mock.call_count, 3)
+        self.assertEqual(len(sleeps), 2)
+        for slept in sleeps:
+            self.assertGreaterEqual(slept, 2)  # Retry-After: 2 beats 1s/2s backoff
+
+    def test_429_exhausts_retries(self):
+        gateway = Gateway("https://example.test/v1", "sk-test", "deepseek-v4-flash")
+        sleeps: list[float] = []
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=[self._http_429(retry_after="1")] * 3,
+        ) as urlopen_mock, mock.patch(
+            "harness.gateway.time.sleep", side_effect=lambda s: sleeps.append(s)
+        ):
+            with self.assertRaises(GatewayError) as cm:
+                list(gateway.stream([{"role": "user", "content": "hi"}]))
+        self.assertIn("429", str(cm.exception))
+        self.assertEqual(urlopen_mock.call_count, 3)
+        self.assertEqual(len(sleeps), 2)
+        for slept in sleeps:
+            self.assertGreaterEqual(slept, 1)
+
+    def test_429_after_content_raises(self):
+        class _FailingStream:
+            """File-like that serves one SSE line, then raises 429 mid-stream."""
+
+            def __init__(self, first: bytes, error: Exception):
+                self._first = first
+                self._error = error
+                self._served = False
+                self.closed = False
+
+            def read1(self, size: int = -1) -> bytes:
+                if not self._served:
+                    self._served = True
+                    return self._first
+                raise self._error
+
+            def read(self, size: int = -1) -> bytes:
+                return self.read1(size)
+
+            def readable(self) -> bool:
+                return True
+
+            def writable(self) -> bool:
+                return False
+
+            def seekable(self) -> bool:
+                return False
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        first_line = b'data: {"choices": [{"delta": {"content": "hi"}, "finish_reason": null}]}\n'
+        response = _FailingStream(first_line, self._http_429())
+        gateway = Gateway("https://example.test/v1", "sk-test", "deepseek-v4-flash")
+        with mock.patch("urllib.request.urlopen", return_value=response) as urlopen_mock, mock.patch(
+            "harness.gateway.time.sleep"
+        ) as sleep_mock:
+            with self.assertRaises(GatewayError) as cm:
+                list(gateway.stream([{"role": "user", "content": "hi"}]))
+        self.assertIn("gateway stream interrupted after content", str(cm.exception))
+        urlopen_mock.assert_called_once()  # retry guard: no second attempt after content
+        sleep_mock.assert_not_called()
+
+    def test_429_retry_after_http_date(self):
+        gateway = Gateway("https://example.test/v1", "sk-test", "deepseek-v4-flash")
+        retry_at = email.utils.formatdate(time.time() + 5)
+        sleeps: list[float] = []
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=[self._http_429(retry_after=retry_at), self._success_stream()],
+        ) as urlopen_mock, mock.patch(
+            "harness.gateway.time.sleep", side_effect=lambda s: sleeps.append(s)
+        ):
+            events = list(gateway.stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual(events, [("content", "hi"), ("done", None)])
+        self.assertEqual(urlopen_mock.call_count, 2)
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreaterEqual(sleeps[0], 2)  # honors date-form Retry-After
+
+    def test_other_4xx_raises_immediately(self):
+        """Non-429 4xx stays fatal: no retries, no sleeps."""
+        hdrs = http.client.HTTPMessage()
+        error = urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions",
+            400,
+            "Bad Request",
+            hdrs,
+            io.BytesIO(b"bad key"),
+        )
+        gateway = Gateway("https://example.test/v1", "sk-test", "deepseek-v4-flash")
+        with mock.patch("urllib.request.urlopen", side_effect=error) as urlopen_mock, mock.patch(
+            "harness.gateway.time.sleep"
+        ) as sleep_mock:
+            with self.assertRaises(GatewayError) as cm:
+                list(gateway.stream([{"role": "user", "content": "hi"}]))
+        self.assertIn("gateway HTTP 400", str(cm.exception))
+        urlopen_mock.assert_called_once()
+        sleep_mock.assert_not_called()
 
 
 if __name__ == "__main__":

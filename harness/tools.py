@@ -3,13 +3,16 @@
 Exposes the agent's tools as OpenAI function-call schemas (the API ``tools``
 param) and executes calls with guardrails: file paths are constrained to the
 project directory (no ``..`` escapes) and destructive shell commands hit a
-DENY list. ``execute`` always returns a string or raises ``ToolError``
-(unknown tool, non-dict args, internal errors).
+DENY list. Shell commands run in a sanitized environment: ``PATH`` is limited
+to the project's ``.venv/bin`` when present, plus ``/usr/local/bin``,
+``/usr/bin``, and ``/bin``. ``execute`` always returns a string or raises
+``ToolError`` (unknown tool, non-dict args, internal errors).
 """
 
 from __future__ import annotations
 
 import copy
+import itertools
 import os
 import re
 import subprocess
@@ -152,12 +155,21 @@ class ToolRegistry:
         return _cap(text)
 
     def _read_lines(self, path: Path, offset: int | None, limit: int | None) -> str:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
         start = max(0, (offset or 1) - 1)
         if limit is None:
-            return "".join(lines[start:])
-        return "".join(lines[start : start + limit])
+            # Whole-file read: documented behavior; the 10k result cap applies.
+            # Read at most cap + suffix slack — the caller truncates to the first
+            # 10k chars anyway, so reading further is pure waste. Skip `start`
+            # lines first (lazily) to honor offset.
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                if start:
+                    for _ in range(start):
+                        next(f, None)
+                return f.read(MAX_RESULT_CHARS + len(TRUNCATED_SUFFIX))
+        # Stream only the requested window — never materialize the whole file.
+        # The TextIOWrapper decodes lazily, line by line, with errors="replace".
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return "".join(itertools.islice(f, start, start + limit))
 
     def _directory_listing(self, path: Path) -> str:
         """Depth-limited listing: immediate children, then one more level."""
@@ -195,6 +207,7 @@ class ToolRegistry:
         except re.error as exc:
             return f"grep: invalid regex {pattern!r}: {exc}"
         matches: list[str] = []
+        total_chars = 0
         try:
             for dirpath, dirnames, filenames in os.walk(root):
                 dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
@@ -205,7 +218,15 @@ class ToolRegistry:
                             for lineno, line in enumerate(f, 1):
                                 if rx.search(line):
                                     rel = full.relative_to(self.project_dir)
-                                    matches.append(f"{rel}:{lineno}: {line.rstrip(chr(10) + chr(13))}")
+                                    entry = f"{rel}:{lineno}: {line.rstrip(chr(10) + chr(13))}"
+                                    if matches:
+                                        total_chars += 1  # the "\n" separator
+                                    total_chars += len(entry)
+                                    matches.append(entry)
+                                    # The result is capped at MAX_RESULT_CHARS anyway;
+                                    # stop scanning as soon as the join would exceed it.
+                                    if total_chars > MAX_RESULT_CHARS:
+                                        return _cap("\n".join(matches))
                     except OSError:
                         continue
         except OSError as exc:
@@ -251,6 +272,10 @@ class ToolRegistry:
         old_text = self._require(args, "old_text", tool)
         new_text = self._require(args, "new_text", tool)
         all_ = bool(args.get("all"))
+        offset = self._int_arg(args, "offset", tool)
+        limit = self._int_arg(args, "limit", tool)
+        if limit is not None and limit < 0:
+            raise ToolError(f"{tool}: limit must be >= 0")
         target = resolve_relative(path, self.project_dir)
         if not target.is_file():
             return f"edit: no such file: {path}"
@@ -260,15 +285,35 @@ class ToolRegistry:
             return f"edit: not valid UTF-8 text: {exc}"
         except OSError as exc:
             return f"edit: {exc}"
-        count = text.count(old_text)
-        if count == 0:
-            return "old_text not found"
-        if count > 1 and not all_:
-            return f"old_text matches {count} times; pass all=true to replace all"
-        if all_:
-            updated = text.replace(old_text, new_text)
+        if offset is not None or limit is not None:
+            # Scope the exact-substring replace to the 1-based line range
+            # [offset, offset+limit): split, replace within the range only,
+            # splice the result back into the line list.
+            lines = text.splitlines(keepends=True)
+            lo = max(0, (offset or 1) - 1)
+            hi = lo + limit if limit is not None else len(lines)
+            range_text = "".join(lines[lo:hi])
+            count = range_text.count(old_text)
+            if count == 0:
+                return "old_text not found"
+            if count > 1 and not all_:
+                return f"old_text matches {count} times; pass all=true to replace all"
+            if all_:
+                updated_range = range_text.replace(old_text, new_text)
+            else:
+                updated_range = range_text.replace(old_text, new_text, 1)
+            lines[lo:hi] = [updated_range]
+            updated = "".join(lines)
         else:
-            updated = text.replace(old_text, new_text, 1)
+            count = text.count(old_text)
+            if count == 0:
+                return "old_text not found"
+            if count > 1 and not all_:
+                return f"old_text matches {count} times; pass all=true to replace all"
+            if all_:
+                updated = text.replace(old_text, new_text)
+            else:
+                updated = text.replace(old_text, new_text, 1)
         try:
             target.write_text(updated, encoding="utf-8")
         except OSError as exc:
@@ -289,6 +334,15 @@ class ToolRegistry:
             for pattern in DENY_PATTERNS:
                 if pattern.search(command):
                     return _DENY_MESSAGE
+        # Sanitized environment: keep the ambient env but restrict PATH to the
+        # project venv (when present) plus a minimal POSIX search path.
+        env = dict(os.environ)
+        path_dirs: list[str] = []
+        venv_bin = self._project_dir / ".venv" / "bin"
+        if venv_bin.is_dir():
+            path_dirs.append(str(venv_bin))
+        path_dirs.extend(["/usr/local/bin", "/usr/bin", "/bin"])
+        env["PATH"] = os.pathsep.join(path_dirs)
         try:
             proc = subprocess.run(
                 command,
@@ -299,6 +353,7 @@ class ToolRegistry:
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return f"bash: timed out after {timeout}s"
@@ -402,13 +457,23 @@ _TOOL_SPECS: list[tuple[str, str, dict[str, Any]]] = [
         "Exact-substring edit of a file: replace `old_text` with `new_text`. A single match is "
         "replaced; zero matches return 'old_text not found'; multiple matches with `all` unset "
         "return an error listing the count. With `all: true`, every occurrence is replaced. "
-        "Escaping paths are blocked.",
+        "Optionally scope the replacement to a line range: `offset` is the 1-based start line "
+        "and `limit` is the number of lines covered; when given, only matches inside that "
+        "range [offset, offset+limit) are considered. Escaping paths are blocked.",
         {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path, relative to the project directory."},
                 "old_text": {"type": "string", "description": "Exact substring to replace."},
                 "new_text": {"type": "string", "description": "Replacement text."},
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based start line of the replacement scope; omit to scope from the top of the file.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of lines in the replacement scope; omit to scope to the end of the file.",
+                },
                 "all": {
                     "type": "boolean",
                     "description": "Replace every occurrence (default: replace only the single match).",
@@ -420,10 +485,11 @@ _TOOL_SPECS: list[tuple[str, str, dict[str, Any]]] = [
     (
         "bash",
         "Run a shell command in the project directory and return combined stdout and stderr "
-        "(capped at 10000 chars). `timeout` defaults to 30 seconds and may not exceed 300. "
-        "Destructive commands (rm -rf, git push, git reset --hard, git clean -f, mkfs, dd, "
-        "fork bombs, `> /dev/sd*`) are blocked by policy unless the registry allows dangerous "
-        "commands.",
+        "(capped at 10000 chars). Runs in a sanitized environment with a minimal PATH (the "
+        "project `.venv/bin` when present, plus `/usr/local/bin`, `/usr/bin`, `/bin`). "
+        "`timeout` defaults to 30 seconds and may not exceed 300. Destructive commands (rm -rf, "
+        "git push, git reset --hard, git clean -f, mkfs, dd, fork bombs, `> /dev/sd*`) are "
+        "blocked by policy unless the registry allows dangerous commands.",
         {
             "type": "object",
             "properties": {

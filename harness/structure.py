@@ -89,7 +89,7 @@ class StructureManager:
     def scan(self) -> str:
         """Build the markdown document (tree + counts + signature comment)."""
         entries = self._ordered(list(self._walk()))
-        files = sum(1 for _, is_dir, _ in entries if not is_dir)
+        files = sum(1 for _, is_dir, _, _ in entries if not is_dir)
         dirs = len(entries) - files
         lines = [
             "# Project Structure",
@@ -104,17 +104,18 @@ class StructureManager:
         if len(lines) > DOC_MAX_LINES:
             lines = lines[:DOC_MAX_LINES]
             lines.append("… (structure truncated)")
-        lines.append(f"{_SIG_PREFIX}{self._signature_from(entries, self.root)}-->")
+        lines.append(f"{_SIG_PREFIX}{self._signature_from(entries)}-->")
         return "\n".join(lines)
 
     # -- walking / hashing --------------------------------------------------
 
-    def _walk(self) -> Iterator[tuple[str, bool, int]]:
-        """Yield (relpath, is_dir, size) for non-noise entries, honoring caps.
+    def _walk(self) -> Iterator[tuple[str, bool, int, int]]:
+        """Yield (relpath, is_dir, size, mtime_ns) for non-noise entries, honoring caps.
 
         Directories first (sorted, case-insensitive) then files, in DFS order;
         a global entry cap stops the walk. Dirs at the depth cap are yielded
-        but not descended into.
+        but not descended into. size and mtime_ns come from one stat call so
+        _signature_from never has to re-stat.
         """
         count = 0
         for dirpath, dirnames, filenames in os.walk(self.root):
@@ -130,32 +131,34 @@ class StructureManager:
                     return
                 path = Path(dirpath) / name
                 try:
-                    size = path.stat().st_size
+                    st = path.stat()
                 except OSError:
                     continue
                 count += 1
-                yield (str(rel / name) if str(rel) != "." else name, True, size)
+                yield (str(rel / name) if str(rel) != "." else name, True, st.st_size, st.st_mtime_ns)
             for name in sorted(filenames, key=str.lower):
                 if count >= MAX_ENTRIES:
                     return
                 path = Path(dirpath) / name
                 try:
-                    size = path.stat().st_size
+                    st = path.stat()
                 except OSError:
                     continue
                 count += 1
-                yield (str(rel / name) if str(rel) != "." else name, False, size)
+                yield (str(rel / name) if str(rel) != "." else name, False, st.st_size, st.st_mtime_ns)
 
     def signature(self) -> str:
         """Stable hash over (relpath, size, mtime_ns) of non-noise entries."""
-        return self._signature_from(self._ordered(list(self._walk())), self.root)
+        return self._signature_from(self._ordered(list(self._walk())))
 
     @staticmethod
-    def _ordered(entries: list[tuple[str, bool, int]]) -> list[tuple[str, bool, int]]:
+    def _ordered(
+        entries: list[tuple[str, bool, int, int]]
+    ) -> list[tuple[str, bool, int, int]]:
         """Preorder sort: dirs before files at each level, DFS-expanded."""
 
-        def key(entry: tuple[str, bool, int]) -> tuple[tuple[str, str], ...]:
-            rel, is_dir, _ = entry
+        def key(entry: tuple[str, bool, int, int]) -> tuple[tuple[str, str], ...]:
+            rel, is_dir, _, _ = entry
             parts = Path(rel).parts
             return tuple(("d", p) for p in parts[:-1]) + (
                 ("d" if is_dir else "f", parts[-1]),
@@ -164,15 +167,10 @@ class StructureManager:
         return sorted(entries, key=key)
 
     @staticmethod
-    def _signature_from(
-        entries: Iterator[tuple[str, bool, int]], root: Path
-    ) -> str:
+    def _signature_from(entries: Iterator[tuple[str, bool, int, int]]) -> str:
+        """Stable hash over (relpath, size, mtime_ns); mtime comes from the walk."""
         hasher = hashlib.sha256()
-        for rel, is_dir, size in sorted(entries, key=lambda e: e[0].lower()):
-            try:
-                mtime_ns = (root / rel).stat().st_mtime_ns
-            except OSError:
-                mtime_ns = 0
+        for rel, is_dir, size, mtime_ns in sorted(entries, key=lambda e: e[0].lower()):
             hasher.update(f"{rel}\0{size}\0{mtime_ns}\n".encode("utf-8"))
         return hasher.hexdigest()
 
@@ -194,16 +192,16 @@ class StructureManager:
 
     # -- rendering ----------------------------------------------------------
 
-    def _tree_lines(self, entries: list[tuple[str, bool, int]]) -> list[str]:
+    def _tree_lines(self, entries: list[tuple[str, bool, int, int]]) -> list[str]:
         """Box-drawing tree lines: ``├──``/``└──``/``│``, dirs first."""
         last_flags: dict[tuple[str, ...], bool] = {}
-        for i, (rel, _, _) in enumerate(entries):
+        for i, (rel, _, _, _) in enumerate(entries):
             parts = Path(rel).parts
             nxt = entries[i + 1] if i + 1 < len(entries) else None
             parent = parts[:-1]
             last_flags[parts] = nxt is None or Path(nxt[0]).parts[: len(parent)] != parent
         lines: list[str] = []
-        for rel, is_dir, size in entries:
+        for rel, is_dir, size, _ in entries:
             parts = Path(rel).parts
             prefix = ""
             for k in range(1, len(parts)):

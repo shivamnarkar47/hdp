@@ -50,10 +50,11 @@ from harness.structure import StructureManager
 from harness.tools import ToolRegistry
 
 # Streaming markdown is re-rendered whole-document per update; flush at most
-# every ~100 ms and cap one turn's markdown so a pathological turn can't jank
-# the UI or blow up the widget.
+# every ~100 ms (slower for big docs) and cap one turn's markdown so a
+# pathological turn can't jank the UI or blow up the widget. Past the cap the
+# overflow appends as a plain text block (~16-20 ms worst flush at 10k).
 MD_FLUSH_SECONDS = 0.1
-MD_CHAR_CAP = 200_000
+MD_CHAR_CAP = 10_000
 
 # Result previews shown in collapsed tool boxes / the trace tab.
 PREVIEW_CHARS = 200
@@ -623,6 +624,7 @@ class HarnessTui(App):
 
         # Auto-follow state for the conversation pane.
         self._follow = True
+        self._scroll_settled_pending = False
         # Per-turn streaming state.
         self._turn_md: Markdown | None = None
         self._turn_raw: Static | None = None
@@ -883,7 +885,11 @@ class HarnessTui(App):
         self.transcript.append(chunk)
         self._md_pending.append(chunk)
         if self._md_timer is None:
-            self._md_timer = self.set_timer(MD_FLUSH_SECONDS, self._flush_md)
+            self._md_timer = self.set_timer(self._md_flush_interval(), self._flush_md)
+
+    def _md_flush_interval(self) -> float:
+        """Adaptive flush cadence: big markdown docs re-render at 4 Hz, not 10 Hz."""
+        return MD_FLUSH_SECONDS if len(self._turn_md_text) < 20_000 else 0.25
 
     def _flush_md(self) -> None:
         """Throttled markdown re-render; also the turn-end flush."""
@@ -1051,10 +1057,15 @@ class HarnessTui(App):
         if self._follow and self._conversation is not None:
             self._conversation.scroll_end(animate=False)
             # Widget heights (markdown, boxes) land on the next layout pass,
-            # so the computed bottom is stale; re-assert it once layout settles.
-            self.set_timer(0.05, self._scroll_follow_settled)
+            # so the computed bottom is stale; re-assert it once layout
+            # settles. Coalesce the settle timer: at high chunk rates only one
+            # pending re-assert is needed.
+            if not self._scroll_settled_pending:
+                self._scroll_settled_pending = True
+                self.set_timer(0.05, self._scroll_follow_settled)
 
     def _scroll_follow_settled(self) -> None:
+        self._scroll_settled_pending = False
         if self._follow and self._conversation is not None:
             self._conversation.scroll_end(animate=False)
 

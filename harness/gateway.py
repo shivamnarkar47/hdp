@@ -6,6 +6,7 @@ know the wire protocol, and this file maps 1:1 to the future Rust/Go port.
 
 from __future__ import annotations
 
+import email.utils
 import http.client
 import io
 import json
@@ -13,6 +14,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Generator, Iterator
 
 from harness.config import MAX_OUTPUT_TOKENS, REASONING_FIELD, REQUEST_TIMEOUT
@@ -100,6 +102,32 @@ def _emit_tool_calls(acc: dict[int, dict]) -> Iterator[StreamEvent]:
         yield ("tool_call", ToolCall(entry["id"] or f"call_{index}", entry["name"], entry["arguments"]))
 
 
+def _parse_retry_after(headers) -> int | None:
+    """Parse a Retry-After header into whole seconds, or None when absent/unparseable.
+
+    Accepts delta-seconds ("5") or an HTTP-date; the date form is measured from
+    now, floored to whole seconds and clamped to >= 0.
+    """
+    if headers is None:
+        return None
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except ValueError:
+        pass
+    try:
+        retry_at = email.utils.parsedate_to_datetime(value)
+        # "-0000" or a missing zone parses to a naive datetime; treat as UTC.
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        return max(0, int(delay))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 class Gateway:
     """SSE streaming client for OpenAI-compatible chat completions."""
 
@@ -113,8 +141,10 @@ class Gateway:
     ) -> Generator[StreamEvent, None, None]:
         """Stream chat completions; yields content/reasoning/tool_call/done events.
 
-        Retries (5xx and network errors, before any event was yielded) up to
-        3 attempts total with 1s/2s/4s backoff. 4xx errors raise immediately.
+        Retries (5xx, network errors, and HTTP 429 rate limits — all only before
+        any event was yielded) up to 3 attempts total with 1s/2s/4s backoff; a
+        429's Retry-After header extends the sleep (capped at 60s). Other 4xx
+        errors raise immediately.
         """
         url = self.base_url.rstrip("/") + "/chat/completions"
         request = urllib.request.Request(
@@ -127,6 +157,7 @@ class Gateway:
         last_error = "unknown error"
         emitted_any = False
         for attempt in range(3):
+            retry_after: int | None = None
             try:
                 for event in self._run_attempt(request):
                     emitted_any = True
@@ -134,10 +165,12 @@ class Gateway:
                 return
             except urllib.error.HTTPError as err:
                 body_preview = err.read().decode("utf-8", errors="replace")[:300]
-                if 400 <= err.code < 500:
+                if 400 <= err.code < 500 and err.code != 429:
                     # Code/key problem — never retry.
                     raise GatewayError(f"gateway HTTP {err.code}: {body_preview}") from err
                 last_error = f"HTTP {err.code}: {body_preview}"
+                if err.code == 429:
+                    retry_after = _parse_retry_after(err.headers)
             except (
                 urllib.error.URLError,
                 TimeoutError,
@@ -150,7 +183,10 @@ class Gateway:
                 # Never retry after visible content.
                 raise GatewayError(f"gateway stream interrupted after content: {last_error}")
             if attempt < 2:
-                time.sleep(backoff[attempt])
+                sleep_seconds = backoff[attempt]
+                if retry_after is not None:
+                    sleep_seconds = min(60, max(sleep_seconds, retry_after))
+                time.sleep(sleep_seconds)
         raise GatewayError(f"gateway request failed after 3 attempts: {last_error}")
 
     def _run_attempt(self, request: urllib.request.Request) -> Iterator[StreamEvent]:

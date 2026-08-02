@@ -338,6 +338,31 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_large_answer_uses_raw_fallback(self):
+        async def flow() -> None:
+            big = "x" * 12_000
+            app = HarnessTui(
+                gateway=FakeGateway([("content", big), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "big answer"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                # Past MD_CHAR_CAP the overflow appends via the raw block;
+                # the full answer (incl. the tail) is mirrored to the transcript.
+                self.assertIn(big[-20:], "".join(app.transcript))
+
+        asyncio.run(flow())
+
     def test_thinking_indicator(self):
         async def flow() -> None:
             app = HarnessTui(

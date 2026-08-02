@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from datetime import date
 from pathlib import Path
@@ -90,6 +91,30 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(content.count("## "), 1)
         self.assertNotIn("run 0", content)
         self.assertIn("run 4", content)
+
+    def test_concurrent_append_is_lossless(self):
+        """Distinct texts appended from many threads all survive (flock serializes)."""
+        memory = self._memory()
+        section = "lessons-learned"
+        texts = [f"note-{i}" for i in range(8)]
+        errors: list[BaseException] = []
+
+        def worker(text: str) -> None:
+            try:
+                memory.append(section, text)
+            except BaseException as exc:  # noqa: BLE001 - record and surface below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(text,)) for text in texts]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        content = (self.root / f"{section}.md").read_text(encoding="utf-8")
+        for text in texts:
+            self.assertIn(text, content)
 
     def test_invalid_section_raises(self):
         memory = self._memory()

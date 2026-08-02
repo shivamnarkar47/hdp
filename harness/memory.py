@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl module
+    fcntl = None  # type: ignore[assignment]
 
 from harness.context import estimate_tokens
 
@@ -18,6 +25,27 @@ SECTIONS: dict[str, str] = {
 DIGEST_TOKEN_CAP = 4000
 DIGEST_MAX_LINES = 60
 MAX_LINES_PER_FILE = 200
+
+
+@contextlib.contextmanager
+def _locked(section_file: Path) -> Iterator[None]:
+    """Serialize the whole append sequence with an advisory exclusive flock.
+
+    The lock is taken on the section file itself (always present — created in
+    ``__init__``), so no separate lock file is needed and flock needs nothing
+    persistent on disk. On platforms without ``fcntl`` (Windows) this is a
+    documented no-op: appends still work, but concurrent processes are not
+    serialized.
+    """
+    handle = section_file.open("a", encoding="utf-8")
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 class Memory:
@@ -80,17 +108,21 @@ class Memory:
 
         Returns `"already recorded"` when `text` already appears in the file,
         otherwise the absolute file path after enforcing the 200-line cap (the
-        oldest `##` section is dropped until the file fits).
+        oldest `##` section is dropped until the file fits). The whole
+        read → dedupe → append → prune sequence runs under an advisory flock
+        on the section file so concurrent hdp runs cannot interleave and lose
+        entries.
         """
         path = self.file_path(section)
-        content = path.read_text(encoding="utf-8")
-        if text in content:
-            return "already recorded"
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {timestamp}\n{text}\n")
-        self._prune(path)
-        return str(path.absolute())
+        with _locked(path):
+            content = path.read_text(encoding="utf-8")
+            if text in content:
+                return "already recorded"
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"\n## {timestamp}\n{text}\n")
+            self._prune(path)
+            return str(path.absolute())
 
     def record_session_summary(self, task: str, outcome: str) -> None:
         """Record a one-line session summary in project-state.md."""

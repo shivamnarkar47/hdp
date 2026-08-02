@@ -39,7 +39,14 @@
 | `hdp run "PROMPT"` | One-shot headless run; answer to stdout |
 | `hdp run --help` | All run flags |
 | `hdp sessions list` | List sessions as `<id> <ts> <prompt>` |
-| `.venv/bin/python -m unittest discover -s tests -v` | All 79 unit tests |
+| `hdp sessions show <id>` | Show one session's details/prompt |
+| `hdp sessions delete <id>` | Delete one session |
+| `hdp sessions prune [--keep N]` | Delete all but the newest N sessions |
+| `hdp doctor` | Self-check: python, textual, api key, gateway, structure cache, sessions dir |
+| `hdp --version` | Print `hdp 0.1.0` and exit |
+| `.venv/bin/python -m unittest discover -s tests -v` | All unit tests |
+
+`hdp run -` reads the prompt from stdin instead of `"PROMPT"` (useful for pipes).
 
 **`hdp run` flags** (from `--help`):
 
