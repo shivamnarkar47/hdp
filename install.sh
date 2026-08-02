@@ -4,7 +4,7 @@
 # Overrides (env): KALA_REPO_URL, KALA_INSTALL_DIR, KALA_BIN_DIR
 set -euo pipefail
 
-REPO_URL="${KALA_REPO_URL:-https://github.com/shivamnarkar47/hdp.git}"
+REPO_URL="${KALA_REPO_URL:-https://github.com/shivamnarkar47/kala.git}"
 INSTALL_DIR="${KALA_INSTALL_DIR:-$HOME/.local/share/kala}"
 BIN_DIR="${KALA_BIN_DIR:-$HOME/.local/bin}"
 

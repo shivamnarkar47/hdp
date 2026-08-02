@@ -5,7 +5,7 @@
 # Overrides (env): KALA_REPO_URL, KALA_INSTALL_DIR, KALA_BIN_DIR
 $ErrorActionPreference = 'Stop'
 
-$RepoUrl   = if ($env:KALA_REPO_URL)   { $env:KALA_REPO_URL }   else { 'https://github.com/shivamnarkar47/hdp.git' }
+$RepoUrl   = if ($env:KALA_REPO_URL)   { $env:KALA_REPO_URL }   else { 'https://github.com/shivamnarkar47/kala.git' }
 $InstallDir = if ($env:KALA_INSTALL_DIR) { $env:KALA_INSTALL_DIR } else { Join-Path $HOME '.local\share\kala' }
 $BinDir    = if ($env:KALA_BIN_DIR)    { $env:KALA_BIN_DIR }    else { Join-Path $HOME '.local\bin' }
 

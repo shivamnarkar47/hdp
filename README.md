@@ -1,10 +1,10 @@
 # kala
 
 [![python](https://img.shields.io/badge/python-3.12+-blue)](https://www.python.org/)
-[![last commit](https://img.shields.io/github/last-commit/shivamnarkar47/hdp)](https://github.com/shivamnarkar47/hdp)
-[![code size](https://img.shields.io/github/languages/code-size/shivamnarkar47/hdp)](https://github.com/shivamnarkar47/hdp)
-[![tests](https://img.shields.io/github/actions/workflow/status/shivamnarkar47/hdp/tests.yml?label=tests)](https://github.com/shivamnarkar47/hdp/actions)
-[![core stdlib only](https://img.shields.io/badge/core-stdlib%20only-green)](https://github.com/shivamnarkar47/hdp)
+[![last commit](https://img.shields.io/github/last-commit/shivamnarkar47/kala)](https://github.com/shivamnarkar47/kala)
+[![code size](https://img.shields.io/github/languages/code-size/shivamnarkar47/kala)](https://github.com/shivamnarkar47/kala)
+[![tests](https://img.shields.io/github/actions/workflow/status/shivamnarkar47/kala/tests.yml?label=tests)](https://github.com/shivamnarkar47/kala/actions)
+[![core stdlib only](https://img.shields.io/badge/core-stdlib%20only-green)](https://github.com/shivamnarkar47/kala)
 
 kala is a DeepSeek V4 Flash agent harness: a Textual TUI plus a `kala run` CLI that drives gateway-backed agent sessions. The core is stdlib-only — `textual` is the only runtime dependency.
 
@@ -18,13 +18,13 @@ kala is a DeepSeek V4 Flash agent harness: a Textual TUI plus a `kala run` CLI t
 Linux/macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/shivamnarkar47/hdp/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/shivamnarkar47/kala/main/install.sh | bash
 ```
 
 Windows (PowerShell):
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/shivamnarkar47/hdp/main/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/shivamnarkar47/kala/main/install.ps1 | iex"
 ```
 
 Both installers honor the `KALA_REPO_URL`, `KALA_INSTALL_DIR`, and `KALA_BIN_DIR` environment overrides, and re-running them updates an existing install.
