@@ -32,11 +32,11 @@ def _session_path(session_id: str) -> Path:
     return get_store_dir() / f"{session_id}.jsonl"
 
 
-def append_event(session_id: str, event: dict) -> None:
-    """Append one event as a JSON line: `{"ts", "type", "data"}`.
+def _record(event: dict) -> dict:
+    """Validate one event and build its `{"ts", "type", "data"}` JSONL record.
 
     `type` must be one of user|assistant|tool_call|tool_result|error|meta
-    (ValueError otherwise). The store directory is created as needed.
+    (ValueError otherwise).
     """
     etype = event.get("type")
     if etype not in VALID_TYPES:
@@ -44,15 +44,37 @@ def append_event(session_id: str, event: dict) -> None:
     data = event.get("data")
     if not isinstance(data, dict):
         data = {}
-    store = get_store_dir()
-    store.mkdir(parents=True, exist_ok=True)
-    record = {
+    return {
         "ts": datetime.now(timezone.utc).isoformat(),
         "type": etype,
         "data": data,
     }
+
+
+def append_events(session_id: str, events: list[dict]) -> None:
+    """Append N events as JSON lines in one open/write/close cycle.
+
+    Every event is validated (and its record built) before the file is
+    touched, so an invalid type raises ValueError with nothing written. An
+    empty list is a no-op. The store directory is created as needed.
+    """
+    if not events:
+        return
+    records = [_record(event) for event in events]
+    store = get_store_dir()
+    store.mkdir(parents=True, exist_ok=True)
     with _session_path(session_id).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def append_event(session_id: str, event: dict) -> None:
+    """Append one event as a JSON line: `{"ts", "type", "data"}`.
+
+    `type` must be one of user|assistant|tool_call|tool_result|error|meta
+    (ValueError otherwise). Thin wrapper over append_events.
+    """
+    append_events(session_id, [event])
 
 
 def _event_to_wire(record: dict) -> dict | None:

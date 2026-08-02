@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from harness.config import CONTEXT_WINDOW, MAX_OUTPUT_TOKENS
-from harness.messages import Message, SystemMessage, UserMessage
+from harness.messages import Message, SystemMessage, UserMessage, wire_token_cost
 
 
 def estimate_tokens(text: str) -> int:
@@ -19,11 +19,17 @@ def context_budget(prompt_tokens: int, max_output_tokens: int = MAX_OUTPUT_TOKEN
     return prompt_tokens <= CONTEXT_WINDOW - max_output_tokens
 
 
-def _wire_token_count(messages: list[Message]) -> int:
-    total = 0
-    for message in messages:
-        total += estimate_tokens(json.dumps(message.to_wire(), ensure_ascii=False))
-    return total
+def message_token_costs(messages: list[Message]) -> list[int]:
+    """Per-message wire token cost, computed once (the truncation ledger).
+
+    Same formula as wire_token_count: estimate_tokens of each message's compact
+    JSON wire dict. O(n) once; callers subtract ledger slices instead of
+    re-serializing the remaining history per dropped turn.
+    """
+    return [
+        estimate_tokens(json.dumps(message.to_wire(), ensure_ascii=False))
+        for message in messages
+    ]
 
 
 def truncate_history(
@@ -32,12 +38,17 @@ def truncate_history(
     """Drop oldest user+assistant+tool-result triples until the history fits.
 
     Never drops the system message, the last user message, or the turn that
-    follows it (its assistant reply and tool results).
+    follows it (its assistant reply and tool results). O(n) total: per-message
+    token costs are computed once into a ledger, and each dropped turn
+    subtracts its ledger slice instead of re-serializing the remainder.
     """
-    # Keep exactly one system message, at the front.
+    # Keep exactly one system message, at the front. The system stays EXCLUDED
+    # from the token count (matching the previous behavior).
     result = [m for m in messages if not isinstance(m, SystemMessage)]
+    ledger = message_token_costs(result)
+    total = sum(ledger)
 
-    while _wire_token_count(result) > max_prompt_tokens:
+    while total > max_prompt_tokens:
         # Oldest droppable turn: the first UserMessage that is not the last one.
         # Recompute the last-user index each round (deletions shift it).
         last_user = max(i for i, m in enumerate(result) if isinstance(m, UserMessage))
@@ -52,13 +63,17 @@ def truncate_history(
             len(result),
         )
         del result[start:end]
+        total -= sum(ledger[start:end])
+        del ledger[start:end]
 
     return [system_message, *result]
 
 
 def wire_token_count(messages: list[dict[str, Any]]) -> int:
-    """Token count for already-converted wire dicts."""
-    total = 0
-    for message in messages:
-        total += estimate_tokens(json.dumps(message, ensure_ascii=False))
-    return total
+    """Token count for already-converted wire dicts.
+
+    Delegates to messages.wire_token_cost, which applies the same per-dict
+    formula (estimate_tokens of the compact JSON) — so callers can switch
+    between the two freely.
+    """
+    return wire_token_cost(messages)

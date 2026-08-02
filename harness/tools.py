@@ -13,14 +13,23 @@ from __future__ import annotations
 
 import copy
 import itertools
+import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
 MAX_RESULT_CHARS = 10_000
 TRUNCATED_SUFFIX = "…[truncated]"
+
+# Tools whose results are pure reads of the project tree: safe to cache.
+_CACHEABLE_TOOLS = frozenset({"read", "grep", "glob"})
+# Tools that mutate state (files or memory): a batch containing any of these
+# bypasses cache lookups entirely (Finding 3 — same-step write-then-read
+# staleness) and invalidates the cache after the batch.
+_MUTATOR_TOOLS = frozenset({"write", "edit", "bash", "memory_append"})
 
 # Destructive command patterns, matched case-insensitively against the shell
 # command before execution (skipped when the registry is allow_dangerous).
@@ -35,7 +44,7 @@ DENY_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">\s*/dev/sd", re.IGNORECASE),
 ]
 
-_SKIP_DIRS = {".git", "__pycache__", "node_modules"}
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".hdp"}
 _MEMORY_SECTIONS = ("project-state", "decisions", "patterns", "lessons-learned")
 _DENY_MESSAGE = "blocked by harness policy (destructive command)"
 
@@ -49,6 +58,21 @@ def _cap(text: str) -> str:
     if len(text) > MAX_RESULT_CHARS:
         return text[:MAX_RESULT_CHARS] + TRUNCATED_SUFFIX
     return text
+
+
+def _format_rg_line(line: str) -> str:
+    """Normalize an rg output line to the harness 'path:lineno: text' format.
+
+    Real ripgrep emits 'path:lineno:text' (no space after the line number)
+    and prefixes paths with './' when the search root is '.'. Strip the
+    prefix and insert the separator space so the result matches the
+    pure-Python scan byte for byte.
+    """
+    if line.startswith("./"):
+        line = line[2:]
+    path, _, rest = line.partition(":")
+    lineno, _, text = rest.partition(":")
+    return f"{path}:{lineno}: {text}"
 
 
 def resolve_relative(path: str, cwd: Path) -> Path:
@@ -68,12 +92,22 @@ def resolve_relative(path: str, cwd: Path) -> Path:
 class ToolRegistry:
     """Registry of the agent's tools: schemas for the API, safe execution."""
 
-    def __init__(self, memory=None, project_dir=None, allow_dangerous=False) -> None:
+    def __init__(
+        self, memory=None, project_dir=None, allow_dangerous=False, cache=None
+    ) -> None:
         self._memory = memory
         self._project_dir = (
             Path(project_dir).resolve() if project_dir is not None else Path.cwd().resolve()
         )
         self.allow_dangerous = allow_dangerous
+        self._cache = cache
+        # Per-batch cache state set by the loop via begin_batch/end_batch:
+        # the structure signature for the current batch (None = caching off,
+        # e.g. when structure is unavailable) and whether this batch contains
+        # a mutator (which disables cache lookups for the WHOLE batch).
+        self._cache_signature: str | None = None
+        self._batch_has_mutator = False
+        self._cached_schemas: list[dict] | None = None
         self._handlers: dict[str, Callable[[dict[str, Any]], str]] = {
             "read": self._tool_read,
             "grep": self._tool_grep,
@@ -82,25 +116,52 @@ class ToolRegistry:
             "edit": self._tool_edit,
             "bash": self._tool_bash,
             "memory_append": self._tool_memory_append,
+            "spawn_agent": self._tool_spawn_agent,
         }
+        # Nested-agent runner injected by AgentLoop after construction
+        # (Finding 6: cli.py builds the registry before the loop). None when
+        # the registry is used standalone — spawn_agent then returns an error
+        # string instead of running anything.
+        self._spawn_handler: Callable[[str, str | None, int, int], str] | None = None
 
     @property
     def project_dir(self) -> Path:
         return self._project_dir
 
+    def set_spawn_handler(
+        self, handler: Callable[[str, str | None, int, int], str] | None
+    ) -> None:
+        """Inject the nested-agent runner used by the spawn_agent tool.
+
+        AgentLoop calls this with its own ``_spawn`` after construction
+        (Finding 6: cli.py builds the registry before the loop). Without a
+        handler — a standalone registry — spawn_agent returns
+        ``spawn_agent: not available in this context``.
+        """
+        self._spawn_handler = handler
+
     def schemas(self) -> list[dict]:
-        """OpenAI function-call schemas for every tool."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
-                    "parameters": copy.deepcopy(parameters),
-                },
-            }
-            for name, description, parameters in _TOOL_SPECS
-        ]
+        """OpenAI function-call schemas for every tool.
+
+        The handler set (and therefore ``_TOOL_SPECS``) is fixed after
+        ``__init__``, so the deep-copied schema list is built once and
+        memoized. Each call returns a fresh top-level list — a caller that
+        mutates the list cannot corrupt the cache; the inner dicts are never
+        mutated by callers and are shared across calls.
+        """
+        if self._cached_schemas is None:
+            self._cached_schemas = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": copy.deepcopy(parameters),
+                    },
+                }
+                for name, description, parameters in _TOOL_SPECS
+            ]
+        return list(self._cached_schemas)
 
     def execute(self, name: str, args: dict) -> str:
         """Run tool ``name`` with ``args``; return a result string or raise ToolError."""
@@ -109,6 +170,29 @@ class ToolRegistry:
         handler = self._handlers.get(name)
         if handler is None:
             raise ToolError(f"unknown tool: {name}")
+        # Read-only tools consult the tool-result cache when a structure
+        # signature is available AND the batch contains no mutator (the
+        # same-step write-then-read staleness hole). Cached values were stored
+        # as result strings, so a hit returns directly without the handler.
+        if (
+            self._cache is not None
+            and self._cache_signature is not None
+            and not self._batch_has_mutator
+            and name in _CACHEABLE_TOOLS
+        ):
+            args_json = json.dumps(args, sort_keys=True)
+            cached = self._cache.get(name, args_json, self._cache_signature)
+            if cached is not None:
+                return cached
+            result = self._run_handler(handler, name, args)
+            self._cache.put(name, args_json, self._cache_signature, result)
+            return result
+        return self._run_handler(handler, name, args)
+
+    @staticmethod
+    def _run_handler(
+        handler: Callable[[dict[str, Any]], str], name: str, args: dict[str, Any]
+    ) -> str:
         try:
             return handler(args)
         except ToolError as exc:
@@ -118,6 +202,35 @@ class ToolRegistry:
             return str(exc)
         except Exception as exc:  # noqa: BLE001 - wrap as an internal error
             raise ToolError(f"tool {name} failed: {exc}") from exc
+
+    # -- per-batch cache state ----------------------------------------------
+
+    def begin_batch(self, names: list[str], structure_sig: str | None) -> None:
+        """Open a tool batch: pin the structure signature and detect mutators.
+
+        Called by the loop before each batch. A batch containing any mutator
+        disables cache lookups for the entire step, closing the same-step
+        write-then-read staleness hole. No-op when no cache is configured.
+        """
+        if self._cache is None:
+            return
+        self._cache_signature = structure_sig
+        self._batch_has_mutator = any(name in _MUTATOR_TOOLS for name in names)
+
+    def end_batch(self, mutated: bool) -> None:
+        """Close a tool batch: drop the cache after a mutating batch.
+
+        ``mutated`` is the loop's own determination (write/edit/bash). A
+        mutating batch refreshes the structure afterwards, which changes the
+        signature anyway — the drop just retires stale entries immediately.
+        A non-mutating batch only clears the batch flag. No-op with no cache.
+        """
+        if self._cache is None:
+            return
+        if mutated:
+            self._cache.drop()
+        self._batch_has_mutator = False
+        self._cache_signature = None
 
     # -- argument plumbing --------------------------------------------------
 
@@ -201,7 +314,96 @@ class ToolRegistry:
             return f"no matches for {pattern}"
         if not root.is_dir():
             return f"grep: no such directory: {args['path']}"
-        flags = 0 if bool(args.get("case")) else re.IGNORECASE
+        case = bool(args.get("case"))
+        if pattern:
+            # rg first when available; None means "fall back" (missing binary,
+            # rg error such as an unsupported regex feature, or OSError).
+            result = self._grep_rg(pattern, root, case)
+            if result is not None:
+                return result
+        return self._grep_python(pattern, root, case)
+
+    def _grep_rg(self, pattern: str, root: Path, case: bool) -> str | None:
+        """rg-backed grep; returns a result string, or None to fall back.
+
+        Streams rg's stdout so scanning stops as soon as the result reaches
+        MAX_RESULT_CHARS — files after the cap are never read, matching the
+        pure-Python path. ``--sort-files`` makes the traversal order
+        deterministic (paths sorted), which is what guarantees the post-cap
+        files never appear regardless of filesystem readdir order.
+        """
+        if shutil.which("rg") is None:
+            return None
+        cmd = [
+            "rg",
+            "--line-number",
+            "--no-heading",
+            "--color",
+            "never",
+            "--sort-files",
+        ]
+        if not case:
+            cmd.append("-i")
+        cmd.extend(
+            [
+                "--glob",
+                "!.git/**",
+                "--glob",
+                "!node_modules/**",
+                "--glob",
+                "!__pycache__/**",
+                "--glob",
+                "!.hdp/**",
+                "--",
+                pattern,
+                str(root.relative_to(self.project_dir)),
+            ]
+        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(self.project_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except OSError:
+            return None
+        assert proc.stdout is not None
+        matches: list[str] = []
+        total_chars = 0
+        try:
+            for line in proc.stdout:
+                entry = _format_rg_line(line.rstrip("\n"))
+                if matches:
+                    total_chars += 1  # the "\n" separator
+                total_chars += len(entry)
+                matches.append(entry)
+                # Same cap semantics as the Python scan: stop the moment the
+                # join would exceed MAX_RESULT_CHARS; the process is reaped in
+                # the finally (stdout close triggers EPIPE, then SIGTERM).
+                if total_chars > MAX_RESULT_CHARS:
+                    return _cap("\n".join(matches))
+        finally:
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        if matches:
+            # Best effort: rg may have exited non-zero mid-stream (e.g. an
+            # error on a later file); keep whatever matched before the failure.
+            return _cap("\n".join(matches))
+        if proc.returncode in (0, 1):
+            return f"no matches for {pattern}"
+        return None  # rg error (exit 2) or other non-zero -> Python fallback
+
+    def _grep_python(self, pattern: str, root: Path, case: bool) -> str:
+        """Reference pure-Python grep scan; also the rg fallback."""
+        flags = 0 if case else re.IGNORECASE
         try:
             rx = re.compile(pattern, flags)
         except re.error as exc:
@@ -376,6 +578,21 @@ class ToolRegistry:
             raise ToolError(f"memory_append: memory store failed: {exc}") from exc
         return str(result)
 
+    def _tool_spawn_agent(self, args: dict[str, Any]) -> str:
+        tool = "spawn_agent"
+        task = self._require(args, "task", tool)
+        if not isinstance(task, str):
+            task = str(task)
+        if self._spawn_handler is None:
+            return "spawn_agent: not available in this context"
+        max_steps = self._int_arg(args, "max_steps", tool, default=5)
+        timeout = self._int_arg(args, "timeout", tool, default=120)
+        # Defensive clamping: the schema already limits these ranges, but a
+        # stray value must not crash the nested loop (at most 5 steps, 300s).
+        max_steps = max(1, min(int(max_steps), 5))
+        timeout = max(1, min(int(timeout), 300))
+        return self._spawn_handler(task, args.get("dir"), max_steps, timeout)
+
 
 # -- schemas ----------------------------------------------------------------
 
@@ -517,6 +734,39 @@ _TOOL_SPECS: list[tuple[str, str, dict[str, Any]]] = [
                 "text": {"type": "string", "description": "Note text to record."},
             },
             "required": ["section", "text"],
+        },
+    ),
+    (
+        "spawn_agent",
+        "Run a nested hdp agent on a sub-task and return its JSON summary "
+        "{answer, steps, usage, session_id}; answer capped at 50000 chars.",
+        {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The sub-task for the nested agent to complete.",
+                },
+                "dir": {
+                    "type": "string",
+                    "description": "Sub-project directory for the nested agent (default: the "
+                    "current project directory; escaping paths are blocked).",
+                },
+                "max_steps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "description": "Maximum turns for the nested agent (default: 5).",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "description": "Wall-clock seconds before the nested run is abandoned "
+                    "(default: 120).",
+                },
+            },
+            "required": ["task"],
         },
     ),
 ]

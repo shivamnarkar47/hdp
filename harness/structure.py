@@ -54,6 +54,10 @@ class StructureManager:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root).resolve()
+        # Most recent structure signature (set by ensure/refresh). The loop
+        # hands it to the tool cache each batch so read results are keyed to
+        # the tree state they were computed against.
+        self.last_signature: str | None = None
 
     # -- cache --------------------------------------------------------------
 
@@ -65,12 +69,17 @@ class StructureManager:
         """Return the cached doc; scan + write on first use (no rescan)."""
         path = self.cache_path
         if path.is_file():
-            return path.read_text(encoding="utf-8")
+            doc = path.read_text(encoding="utf-8")
+            # Warm start: recover the signature from the cached doc so the
+            # tool cache can serve hits from the very first batch.
+            self.last_signature = self._stored_signature()
+            return doc
         return self.refresh()
 
     def refresh(self) -> str:
         """Cheap signature scan; regenerate only when the tree changed."""
         sig = self.signature()
+        self.last_signature = sig
         if sig == self._stored_signature():
             path = self.cache_path
             if path.is_file():

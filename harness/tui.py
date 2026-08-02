@@ -862,6 +862,11 @@ class HarnessTui(App):
         elif kind == "tool_result":
             _, call_id, content = event
             self._on_tool_result(call_id, content)
+        elif kind == "verify":
+            # Post-mutation verify output: a dim pane line, NOT streaming md.
+            text = event[1]  # type: ignore[arg-type]
+            preview = text if len(text) <= 160 else text[:160] + "…"
+            self._write_line(f"🧪 verify: {preview}", classes="notice")
         elif kind == "error":
             self._write_line(f"error: {event[1]}", classes="error-box")
             self._flush_md()

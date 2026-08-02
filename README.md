@@ -32,12 +32,12 @@ Both installers honor the `HDP_REPO_URL`, `HDP_INSTALL_DIR`, and `HDP_BIN_DIR` e
 ## Usage
 
 - `hdp` — launch the Textual TUI
-- `hdp run "PROMPT"` — one-shot session from the CLI (`--dir`, `--model`, `--max-steps`, `--resume SESSION_ID`, `--json`, …)
+- `hdp run "PROMPT"` — one-shot session from the CLI (`--dir`, `--model`, `--max-steps`, `--resume SESSION_ID`, `--json`, …); `--batch FILE --workers N` runs many prompts (one per line or a JSON array) as parallel sessions; `--no-tool-cache` and `--no-verify` disable the read-result cache and post-mutation verify hooks
 - `hdp sessions list` — list past sessions
 - `hdp sessions show|delete|prune` — inspect/delete/prune sessions; `hdp doctor` — self-check; `hdp run -` — read the prompt from stdin; `hdp --version`
 - TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/connect`, `/structure`, `/memory`, `/model`, `/verbose`, `/quit`
 
-The project tree is scanned automatically and cached in `.hdp/STRUCTURE.md` (git-ignored, regenerable); it's injected into the system prompt and refreshed when files change.
+The project tree is scanned automatically and cached in `.hdp/STRUCTURE.md` (git-ignored, regenerable); it's injected into the system prompt and refreshed when files change. `.hdp/` also holds the read-only tool-result cache (`tool-cache.json`, keyed to the tree signature, `--no-tool-cache` to disable) and optional verify hooks (`hooks.json`, run after mutating steps, `--no-verify` to disable).
 
 ## How it works
 

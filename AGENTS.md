@@ -10,7 +10,7 @@
 - `hdp` — launch the Textual TUI (default surface; requires an API key)
 - `hdp run "PROMPT" [flags]` — one-shot headless agent run
 - `hdp sessions list` — show persisted sessions
-- `.venv/bin/python -m unittest discover -s tests -v` — all 79 unit tests (stdlib unittest)
+- `.venv/bin/python -m unittest discover -s tests -v` — all 200+ unit tests (stdlib unittest)
 
 **GOTCHA: the two hard things (know these before touching anything):**
 1. **DSML healing.** The model emits tool calls as a DSML XML envelope (`<｜DSML｜tool_calls>`, fullwidth pipe **U+FF5C**) that leaks into visible `delta.content` instead of arriving as structured `tool_calls`. `harness/dialect.py` `DialectFeed` heals it incrementally and strips leaked chat-template tokens (`<｜begin▁of▁sentence｜>`, `<｜Assistant｜>`, …). When both arrive, **structured tool_calls win** over healed ones (`loop.py`).
@@ -61,6 +61,10 @@
 | `--resume SESSION_ID` | continue a session | none |
 | `--verbose` | print reasoning to stderr | off |
 | `--json` | final JSON line `{"session_id","answer","steps","tool_calls"}` | off |
+| `--batch FILE` | run prompts from FILE (one per line, or a JSON array), one session each | none |
+| `--workers N` | max concurrent `--batch` tasks | `min(4, cpu count)` |
+| `--no-tool-cache` | disable the read-only tool-result cache (`.hdp/tool-cache.json`) | off (cache on) |
+| `--no-verify` | disable verify hooks after mutation (`.hdp/hooks.json`) | off (verify on) |
 
 **Exit codes:** `0` answer produced · `1` config/key/gateway error · `2` loop error (max steps, context overflow, tool loop, 5 consecutive tool failures).
 
@@ -97,6 +101,12 @@
 - **Front-end:** `tui.py` — the ONLY module importing `textual`; thin, disposable. `cli.py` lazy-imports it only on the no-subcommand path.
 - **Port seam:** the `AgentEvent` stream in `loop.py` — the TUI and `hdp run` both consume exactly this; never bypass it.
 - **Gateway behavior:** retries 5xx/network up to 3× (1s/2s/4s backoff); 4xx raises immediately; never retries after visible content.
+- **Parallel tool batches:** all-read batches (`read`/`grep`/`glob`) run concurrently (≤4 workers); any batch containing a mutator runs serially in call order. Events, persistence, tool-loop detection, and failure counting are recorded in call order on the main thread.
+- **grep:** rg-backed when `rg` is on PATH (streamed so scanning stops at the result cap); pure-Python scan is the fallback (missing binary, exit 2, empty pattern, OSError). `.hdp` joins grep's skip dirs.
+- **HTTP keep-alive:** one connection reused across turns (per-thread sockets, so `--batch` workers never share one); off with `HARNESSDP_NO_KEEPALIVE=1` or any proxy env var; reconnect-on-error degenerates to the plain urllib path.
+- **Tool-result cache:** read/grep/glob results cached in `.hdp/tool-cache.json` (git-ignored, atomic write, 4 MB cap) keyed by `tool|sha256(args)|structure_signature` — a changed tree auto-misses. Staleness is only possible for external edits between refreshes; a mutating batch bypasses lookups for the whole step and drops the cache at refresh; `--no-tool-cache` disables.
+- **Verify hooks:** after a mutating batch, the configured `.hdp/hooks.json` `verify` command runs (30 s timeout) and its output is appended as a `user` message (`[verify] …`, dimmed in TUI, stderr in `hdp run`) — content for the model, never a loop abort. No hooks file = off; `--no-verify` disables.
+- **spawn_agent:** nested `AgentLoop` on a sub-task (own session id, visible in `hdp sessions list`; serially for v1). Recursion depth-capped at 2; nested runs get `allow_dangerous=False` and no tool cache.
 
 **Events:**
 - `AgentEvent` (loop → front end): `("content",str) | ("reasoning",str) | ("tool_start",ToolCall) | ("tool_result",id,str) | ("done",str) | ("error",str)`
@@ -137,6 +147,10 @@
 | `Discarding unclosed DSML section…` (log) | unclosed envelope that parsed ≥1 invoke — `flush()` discards it (a malformed real call is better lost than executed); sections with **0 invokes** are now RECOVERED as visible text, not discarded (they were prose quotes of the envelope) |
 | `tool loop detected` / `5 consecutive tool failures` | loop aborted; exit 2 |
 | `(busy — Ctrl+C cancels the current turn)` | TUI turn in flight; input disabled until done |
+| `HARNESSDP_NO_KEEPALIVE=1` | keep-alive transport off (plain urllib path); also auto-off with any proxy env var |
+| stale tool results after external edits | read-only tool cache is signature-keyed (changed tree = miss) with a same-step write/read bypass; opt out with `--no-tool-cache` |
+| `[verify] …` user message after a mutation batch | post-mutation self-check ran (`.hdp/hooks.json`); its output is fed back to the model as content |
+| `spawn_agent: recursion limit reached` | nested-agent depth cap (2 loops) — an expected guardrail, not an error |
 
 ## 5. PITFALLS
 
@@ -164,9 +178,9 @@
 
 **AGENTS.md = durable anchor; `.agent-memory/` = dynamic state.** Edit AGENTS.md only for stable, load-bearing facts; use memory files for evolving state.
 
-### Structure cache (`.hdp/STRUCTURE.md`)
+### `.hdp/` files — caches & config, NOT memory
 
-Regenerable cache — NOT memory. `harness/structure.py` scans the project tree (noise dirs skipped: `.git` `.venv` `node_modules` `.hdp` `dist` `build` `.omp` `__pycache__` + caches; depth ≤ 6, ≤ 20k entries, ≤ 500 lines) and writes a markdown tree under `.hdp/` (git-ignored; atomic temp+replace write). A signature (`<!-- sig: … -->` comment at the end) hashes (relpath, size, mtime_ns); `refresh()` regenerates only when it changed, `ensure()` never rescans an existing cache. The first ~120 lines are injected into the system prompt (`prompts.build_project_context`) so reopen is instant. Refreshed after every tool batch (`loop._one_step`) and between TUI turns (`turn_finished`); TUI shows a one-line summary on mount and `/structure` dumps the doc.
+Memory lives only in `.agent-memory/`; everything under `.hdp/` is regenerable cache or explicit config: `STRUCTURE.md` (tree cache, below), `tool-cache.json` (read-only tool-result cache, §2), and `hooks.json` (verify-hook config, §2). `harness/structure.py` scans the project tree (noise dirs skipped: `.git` `.venv` `node_modules` `.hdp` `dist` `build` `.omp` `__pycache__` + caches; depth ≤ 6, ≤ 20k entries, ≤ 500 lines) and writes a markdown tree under `.hdp/` (git-ignored; atomic temp+replace write). A signature (`<!-- sig: … -->` comment at the end) hashes (relpath, size, mtime_ns); `refresh()` regenerates only when it changed, `ensure()` never rescans an existing cache. The first ~120 lines are injected into the system prompt (`prompts.build_project_context`) so reopen is instant. Refreshed after every tool batch (`loop._one_step`) and between TUI turns (`turn_finished`); TUI shows a one-line summary on mount and `/structure` dumps the doc.
 
 ## 7. Tool preferences
 

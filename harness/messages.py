@@ -7,6 +7,7 @@ verbatim; dropping it causes a 400 on the next turn with this gateway.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Union
 
@@ -72,10 +73,21 @@ class ToolResultMessage:
 Message = Union[SystemMessage, UserMessage, AssistantMessage, ToolResultMessage]
 
 
+def wire_token_cost(wire: list[dict[str, Any]]) -> int:
+    """Total token cost of already-converted wire dicts.
+
+    Same formula as context.estimate_tokens (one token per three characters of
+    the compact JSON serialization): ``sum(estimate_tokens(json.dumps(m,
+    ensure_ascii=False)) for m in wire)``. Computed inline here to keep this
+    module free of a context import (context imports messages).
+    """
+    return sum(len(json.dumps(message, ensure_ascii=False)) // 3 for message in wire)
+
+
 def to_wire_messages(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert message objects to wire dicts.
 
-    Multiple system blocks are coalesced into one message ("\\n\\n".join) before
+    Multiple system blocks are coalesced into one message ("\n\n".join) before
     sending — safe for strict chat templates.
     """
     out: list[dict[str, Any]] = []

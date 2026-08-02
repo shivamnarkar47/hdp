@@ -10,9 +10,12 @@ import email.utils
 import http.client
 import io
 import json
+import os
 import socket
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Generator, Iterator
@@ -27,6 +30,161 @@ StreamEvent = tuple[str, str | ToolCall] | tuple[str, str]
 
 class GatewayError(Exception):
     """Raised for gateway failures that are not retryable or exhausted retries."""
+
+
+# -- transport ---------------------------------------------------------------
+# Keep-alive: reuse one HTTP(S) connection per thread across turns so every
+# chat turn doesn't pay a fresh TCP+TLS handshake. Enabled by default; off when
+# HARNESSDP_NO_KEEPALIVE=1 or any proxy env var is set (proxies need per-
+# request connection state we don't manage). The module-level ``_urlopen`` is
+# the seam Gateway.stream() calls; tests patch it directly.
+
+_PROXY_ENV_VARS = (
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+)
+
+
+class _KeepAliveResponse(io.BytesIO):
+    """In-memory response for a keep-alive request.
+
+    The body was fully read at open() time, so the socket is drained and safe
+    to reuse. BytesIO already provides everything io.TextIOWrapper needs:
+    iteration of bytes lines, .readable(), .read1(), and .close().
+    """
+
+    pass
+
+
+class KeepAliveOpener:
+    """Classic keep-alive opener: one cached HTTP(S) connection per thread.
+
+    ``open(request, timeout=...)`` behaves like ``urllib.request.urlopen`` for
+    the gateway's needs: non-2xx responses raise ``urllib.error.HTTPError``
+    with the body readable (so Gateway.stream's retry/backoff logic is
+    untouched), and transport errors surface as URLError/ConnectionError/
+    http.client exceptions — all of which Gateway.stream already handles. A
+    stale cached socket (server closed it) is detected on send/read, closed,
+    and the request is retried ONCE on a fresh connection.
+    """
+
+    def __init__(self, timeout: float | None = None) -> None:
+        self._timeout = timeout
+        self._local = threading.local()
+
+    def open(self, request, timeout: float | None = None):
+        if timeout is None:
+            timeout = self._timeout
+        scheme, host, port, path = _split_request_url(request.full_url)
+        key = (scheme, host, port)
+        cached = getattr(self._local, "cached", None)
+        if cached is not None and cached[0] != key:
+            self._drop()
+            cached = None
+        for attempt in (0, 1):
+            conn = cached[1] if cached is not None else None
+            if conn is None:
+                conn = self._connect(scheme, host, port, timeout)
+            try:
+                conn.request(
+                    request.get_method(),
+                    path,
+                    body=request.data,
+                    headers=dict(request.headers),
+                )
+                resp = conn.getresponse()
+                body = resp.read()
+            except urllib.error.HTTPError:
+                raise
+            except (http.client.HTTPException, OSError) as err:
+                self._drop()
+                self._close_quietly(conn)
+                cached = None
+                if attempt == 1:
+                    raise _as_transport_error(err)
+                continue  # stale socket: retry once on a fresh connection
+            if 200 <= resp.status < 300:
+                if not resp.will_close:
+                    self._local.cached = (key, conn)
+                else:
+                    self._local.cached = None  # server asked us to close
+                    self._close_quietly(conn)
+                return _KeepAliveResponse(body)
+            # Non-2xx: never reuse the connection; surface like urlopen does.
+            self._local.cached = None
+            self._close_quietly(conn)
+            raise urllib.error.HTTPError(
+                request.full_url, resp.status, resp.reason, resp.headers, io.BytesIO(body)
+            )
+        raise urllib.error.URLError("keep-alive transport exhausted")  # unreachable
+
+    def _drop(self) -> None:
+        cached = getattr(self._local, "cached", None)
+        self._local.cached = None
+        if cached is not None:
+            self._close_quietly(cached[1])
+
+    @staticmethod
+    def _close_quietly(conn) -> None:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _connect(scheme: str, host: str, port: int, timeout):
+        if scheme == "https":
+            return http.client.HTTPSConnection(host, port, timeout=timeout)
+        return http.client.HTTPConnection(host, port, timeout=timeout)
+
+
+def _split_request_url(url: str) -> tuple[str, str, int, str]:
+    """Split a URL into (scheme, host, port, path-with-query)."""
+    parts = urllib.parse.urlsplit(url)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    return parts.scheme, parts.hostname, port, path
+
+
+def _as_transport_error(err: Exception) -> Exception:
+    """Wrap a transport error the way urlopen does, if stream() wouldn't catch it."""
+    if isinstance(err, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException)):
+        return err
+    return urllib.error.URLError(err)
+
+
+_KEEPALIVE_OPENER = KeepAliveOpener()
+
+
+def _keepalive_urlopen(request, timeout=None):
+    """Module opener: perform the request on the per-thread keep-alive connection."""
+    return _KEEPALIVE_OPENER.open(request, timeout=timeout)
+
+
+def _keepalive_enabled() -> bool:
+    """Keep-alive is on by default; off with HARNESSDP_NO_KEEPALIVE=1 or proxies."""
+    if os.environ.get("HARNESSDP_NO_KEEPALIVE") == "1":
+        return False
+    return not any(os.environ.get(var) for var in _PROXY_ENV_VARS)
+
+
+def _set_transport() -> None:
+    """Pick the module opener: keep-alive unless env/proxies disable it."""
+    global _urlopen
+    if _keepalive_enabled():
+        _urlopen = _keepalive_urlopen
+    else:
+        _urlopen = urllib.request.urlopen
+
+
+_urlopen = urllib.request.urlopen
+_set_transport()
 
 
 def _build_headers(api_key: str) -> dict:
@@ -191,7 +349,7 @@ class Gateway:
 
     def _run_attempt(self, request: urllib.request.Request) -> Iterator[StreamEvent]:
         """One full open+read cycle; raises on any transport failure."""
-        response = urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT)
+        response = _urlopen(request, timeout=REQUEST_TIMEOUT)
         try:
             wrapper = io.TextIOWrapper(response, encoding="utf-8")
             tool_acc: dict[int, dict] = {}

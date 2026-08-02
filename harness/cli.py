@@ -11,6 +11,7 @@ spending tokens.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import sqlite3
@@ -38,7 +39,24 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="subcommand")
 
     run_p = sub.add_parser("run", help="run a one-shot prompt")
-    run_p.add_argument("prompt", help="the task to run, or `-` to read it from stdin")
+    prompt_group = run_p.add_mutually_exclusive_group()
+    prompt_group.add_argument(
+        "prompt",
+        nargs="?",
+        help="the task to run, or `-` to read it from stdin",
+    )
+    prompt_group.add_argument(
+        "--batch",
+        metavar="FILE",
+        default=None,
+        help="run prompts from FILE (one per line, or a JSON array), one session each",
+    )
+    run_p.add_argument(
+        "--workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="max concurrent --batch tasks (default: min(4, cpu count))",
+    )
     run_p.add_argument("--dir", default=None, help="project directory (default: cwd)")
     run_p.add_argument("--model", default=None, help=f"model id (default: {config.MODEL_ID})")
     run_p.add_argument("--max-steps", type=int, default=20, help="max agent turns (default: 20)")
@@ -49,6 +67,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--resume", metavar="SESSION_ID", default=None, help="continue a session")
     run_p.add_argument("--verbose", action="store_true", help="print reasoning to stderr")
     run_p.add_argument("--json", action="store_true", help="final JSON line with session/answer")
+    run_p.add_argument(
+        "--no-tool-cache",
+        action="store_true",
+        help="disable the read-only tool-result cache (.hdp/tool-cache.json)",
+    )
+    run_p.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="disable verify hooks after mutation (.hdp/hooks.json)",
+    )
 
     sessions_p = sub.add_parser("sessions", help="session store commands")
     sessions_sub = sessions_p.add_subparsers(dest="sessions_subcommand")
@@ -68,7 +96,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     if args.subcommand is None:
         # Lazy import: `hdp run` must work even without textual installed.
         from harness.tui import main as tui_main
@@ -76,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
         tui_main()
         sys.exit(0)
     if args.subcommand == "run":
-        code = _run(args)
+        code = _run(args, parser)
     elif args.subcommand == "sessions":
         code = _sessions(args)
     elif args.subcommand == "doctor":
@@ -86,23 +115,61 @@ def main(argv: list[str] | None = None) -> None:
     sys.exit(code)
 
 
-def _run(args: argparse.Namespace) -> int:
+def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.prompt is None:
+        if args.batch is None:
+            parser.error("the following arguments are required: prompt")
+        return _run_batch(args, parser)
     prompt = args.prompt
     if prompt == "-":
         # Reading from a TTY blocks; that is the user's explicit choice.
         prompt = sys.stdin.read().strip()
-    # SystemExit(1) from a missing/invalid key is the correct exit for config errors.
-    key = config.get_api_key()
+    session_id = args.resume or sessions.new_session_id()
+    record = _run_one(prompt, args, session_id)
+    if "error" in record:
+        if record.get("error_kind") == "config":
+            # config.get_api_key already printed its message; nothing to add.
+            return 1
+        print(f"hdp: {record['error']}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"session_id": record["session_id"], "error": record["error"]}))
+        return 2 if record.get("error_kind") == "loop" else 1
+    if args.json:
+        print(json.dumps(_public_record(record)))
+    return 0
+
+
+def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
+    """Run one prompt through the full per-run machinery; return its record.
+
+    Shared by the single-run path and every ``--batch`` worker. ``session_id``
+    is chosen by the caller (single run: ``--resume`` or a fresh id; batch:
+    one fresh id per task — microsecond-precision, collision-free). Returns
+    the success record ``{session_id, answer, steps, tool_calls, usage}`` or
+    an error record ``{session_id, error, error_kind}`` where ``error_kind``
+    is one of "config" | "gateway" | "loop" (config/gateway -> exit 1,
+    loop -> exit 2, matching the pre-refactor single-run behavior).
+    """
+    try:
+        key = config.get_api_key()
+    except SystemExit:
+        # Missing/invalid key: config already printed the instructions.
+        return {"session_id": session_id, "error": "no API key", "error_kind": "config"}
     project_dir = Path(args.dir or Path.cwd())
     memory_root = Path(args.memory_root or project_dir / ".agent-memory")
     memory = Memory(memory_root)
+    cache = None
+    if not args.no_tool_cache:
+        from harness.toolcache import ToolCache
+
+        cache = ToolCache(project_dir / ".hdp" / "tool-cache.json")
     tools = ToolRegistry(
         memory=memory,
         project_dir=project_dir,
         allow_dangerous=args.allow_dangerous,
+        cache=cache,
     )
     gateway = Gateway(config.BASE_URL, key, args.model or config.MODEL_ID)
-    session_id = args.resume or sessions.new_session_id()
     loop = AgentLoop(
         gateway,
         tools,
@@ -111,6 +178,7 @@ def _run(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         allow_dangerous=args.allow_dangerous,
         resume=bool(args.resume),
+        enable_verify=not args.no_verify,
     )
     tool_calls = 0
 
@@ -122,31 +190,112 @@ def _run(args: argparse.Namespace) -> int:
         elif kind == "reasoning":
             if args.verbose:
                 print(f"[think] {event[1]}", file=sys.stderr)
+        elif kind == "verify":
+            print(f"[verify] {event[1]}", file=sys.stderr)
         elif kind == "tool_start":
             tool_calls += 1
 
     try:
         answer = loop.run(prompt, emit=emit_cb)
     except LoopError as exc:
-        print(f"hdp: {exc}", file=sys.stderr)
-        if args.json:
-            print(json.dumps({"session_id": session_id, "error": str(exc)}))
-        return 2
+        return {"session_id": session_id, "error": str(exc), "error_kind": "loop"}
     except GatewayError as exc:
-        print(f"hdp: {exc}", file=sys.stderr)
+        return {"session_id": session_id, "error": str(exc), "error_kind": "gateway"}
+    return {
+        "session_id": session_id,
+        "answer": answer,
+        # getattr defaults keep minimal loop stubs (flag-plumbing tests)
+        # working; a real AgentLoop always exposes these.
+        "steps": getattr(loop, "steps", 0),
+        "tool_calls": tool_calls,
+        "usage": getattr(loop, "usage", {}),
+    }
+
+
+def _public_record(record: dict) -> dict:
+    """Strip the internal ``error_kind`` field before JSON output."""
+    return {key: value for key, value in record.items() if key != "error_kind"}
+
+
+def _read_batch_prompts(path: str) -> list[str]:
+    """Read a --batch file: a JSON array of strings, else one prompt per line.
+
+    Blank lines and empty strings are dropped in both modes. A file that is
+    valid JSON but not a string array (e.g. ``[1, 2]`` or a bare string)
+    falls back to the line-per-prompt interpretation.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    prompts: list[str] = []
+    stripped = text.strip()
+    if stripped:
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            prompts = [item for item in parsed if item.strip()]
+    if not prompts:
+        prompts = [line.strip() for line in text.splitlines()]
+    return [prompt for prompt in prompts if prompt]
+
+
+def _batch_task(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
+    """One --batch worker: announce the task, then run it via _run_one."""
+    if not args.json:
+        print(f"--- {session_id} ---", flush=True)
+    return _run_one(prompt, args, session_id)
+
+
+def _run_batch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """Run every prompt in the --batch file concurrently; one session each.
+
+    Each task gets its own AgentLoop, Gateway, Memory, ToolRegistry and a
+    fresh session id (a fresh registry per task avoids cross-task
+    begin_batch/end_batch cache-state leakage; the project dir is shared).
+    Records land in file order whatever the worker count. Exit: 0 if all
+    tasks produced answers, 1 if any config/key/gateway error, 2 if any
+    loop error; per-kind failure counts go to stderr.
+    """
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+    try:
+        prompts = _read_batch_prompts(args.batch)
+    except OSError as exc:
+        print(f"hdp: cannot read batch file: {exc}", file=sys.stderr)
         return 1
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "answer": answer,
-                    "steps": loop.steps,
-                    "tool_calls": tool_calls,
-                    "usage": loop.usage,
-                }
-            )
+    if not prompts:
+        print("hdp: batch file contains no prompts", file=sys.stderr)
+        return 1
+    session_ids = [sessions.new_session_id() for _ in prompts]
+    records: list[dict | None] = [None] * len(prompts)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {
+            pool.submit(_batch_task, prompt, args, session_id): index
+            for index, (prompt, session_id) in enumerate(zip(prompts, session_ids))
+        }
+        for future in concurrent.futures.as_completed(futures):
+            records[futures[future]] = future.result()
+    assert all(record is not None for record in records)
+    counts = {"config": 0, "gateway": 0, "loop": 0}
+    for record in records:
+        kind = record.get("error_kind")
+        if kind in counts:
+            counts[kind] += 1
+    failed = sum(counts.values())
+    if failed:
+        detail = ", ".join(
+            f"{count} {kind}" for kind, count in counts.items() if count
         )
+        print(
+            f"hdp: batch: {failed} of {len(prompts)} task(s) failed ({detail})",
+            file=sys.stderr,
+        )
+    if args.json:
+        print(json.dumps([_public_record(record) for record in records]))
+    if counts["config"] or counts["gateway"]:
+        return 1
+    if counts["loop"]:
+        return 2
     return 0
 
 

@@ -1,8 +1,11 @@
 """Tool registry tests: schemas, execution, path safety, DENY list, caps."""
 
+import json
+import shutil
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from harness.tools import (
     DENY_PATTERNS,
@@ -146,12 +149,64 @@ class TestToolRegistry(unittest.TestCase):
         names = {schema["function"]["name"] for schema in self.reg.schemas()}
         self.assertEqual(
             names,
-            {"read", "grep", "glob", "write", "edit", "bash", "memory_append"},
+            {"read", "grep", "glob", "write", "edit", "bash", "memory_append", "spawn_agent"},
         )
         for schema in self.reg.schemas():
             self.assertEqual(schema["type"], "function")
             self.assertIn("description", schema["function"])
             self.assertEqual(schema["function"]["parameters"]["type"], "object")
+
+    def test_spawn_agent_schema(self):
+        schema = next(
+            s for s in self.reg.schemas() if s["function"]["name"] == "spawn_agent"
+        )
+        params = schema["function"]["parameters"]
+        self.assertEqual(params["required"], ["task"])
+        self.assertEqual(params["properties"]["max_steps"]["maximum"], 5)
+        self.assertEqual(params["properties"]["timeout"]["maximum"], 300)
+        self.assertIn("dir", params["properties"])
+        self.assertIn("session_id", schema["function"]["description"])
+
+    def test_spawn_agent_without_handler(self):
+        result = self.reg.execute("spawn_agent", {"task": "do the thing"})
+        self.assertEqual(result, "spawn_agent: not available in this context")
+
+    def test_spawn_agent_with_stub_handler(self):
+        calls = []
+
+        def handler(task, dir_, max_steps, timeout):
+            calls.append((task, dir_, max_steps, timeout))
+            return json.dumps({"answer": "done", "steps": 1, "usage": {}, "session_id": "n-1"})
+
+        self.reg.set_spawn_handler(handler)
+        result = self.reg.execute(
+            "spawn_agent",
+            {"task": "do it", "dir": "sub", "max_steps": 3, "timeout": 42},
+        )
+        self.assertEqual(json.loads(result)["answer"], "done")
+        self.assertEqual(calls, [("do it", "sub", 3, 42)])
+
+    def test_spawn_agent_handler_defaults(self):
+        calls = []
+        self.reg.set_spawn_handler(
+            lambda task, dir_, max_steps, timeout: calls.append((task, dir_, max_steps, timeout))
+            or "ok"
+        )
+        self.reg.execute("spawn_agent", {"task": "t"})
+        self.assertEqual(calls, [("t", None, 5, 120)])  # dir None, max_steps 5, timeout 120
+
+    def test_spawn_agent_clamps_out_of_range(self):
+        calls = []
+        self.reg.set_spawn_handler(
+            lambda task, dir_, max_steps, timeout: calls.append((task, dir_, max_steps, timeout))
+            or "ok"
+        )
+        self.reg.execute(
+            "spawn_agent", {"task": "t", "max_steps": 99, "timeout": 9999}
+        )
+        self.assertEqual(calls, [("t", None, 5, 300)])
+        self.reg.execute("spawn_agent", {"task": "t", "max_steps": 0, "timeout": 0})
+        self.assertEqual(calls[-1], ("t", None, 1, 1))
 
 
     def test_read_range_on_huge_file(self):
@@ -250,6 +305,77 @@ class TestToolRegistry(unittest.TestCase):
         # offset without limit still honors the start line, then caps.
         tail = self.reg.execute("read", {"path": "huge2.txt", "offset": 1_999_999})
         self.assertEqual(tail, "line 1999999\nline 2000000\n")
+
+    def test_schemas_memoized(self):
+        # First call deep-copies the spec list once; later calls return a
+        # fresh top-level list (so caller mutation can't corrupt the cache)
+        # but reuse the same inner dicts.
+        first = self.reg.schemas()
+        second = self.reg.schemas()
+        self.assertEqual(first, second)
+        self.assertIsNot(first, second)  # shallow copy: distinct list object
+        self.assertEqual(len(first), 8)
+        for inner_first, inner_second in zip(first, second):
+            self.assertIs(inner_first, inner_second)  # memoized inner dicts
+
+    def test_grep_skips_hdp_dir(self):
+        # The tool cache lives under .hdp and must never be scanned by grep.
+        self.make(".hdp/tool-cache.json", '{"needle": "cached secret"}')
+        self.make("visible.txt", "needle visible\n")
+        result = self.reg.execute("grep", {"pattern": "needle"})
+        self.assertIn("visible.txt:1: needle visible", result)
+        self.assertNotIn("tool-cache", result)
+
+    def test_grep_rg_python_equivalence(self):
+        """rg (when available) and the Python fallback return the same matches."""
+        if shutil.which("rg") is None:
+            self.skipTest("rg not on PATH")
+        self.make("alpha.txt", "needle alpha\nplain line\n")
+        self.make("beta.txt", "NEEDLE upper\n")
+        self.make("sub/gamma.txt", "nothing here\nneedle gamma\n")
+        rg_result = self.reg.execute("grep", {"pattern": "needle"})
+        rg_case = self.reg.execute("grep", {"pattern": "NEEDLE", "case": True})
+        with mock.patch("harness.tools.shutil.which", return_value=None):
+            py_result = self.reg.execute("grep", {"pattern": "needle"})
+            py_case = self.reg.execute("grep", {"pattern": "NEEDLE", "case": True})
+        self.assertEqual(sorted(rg_result.splitlines()), sorted(py_result.splitlines()))
+        self.assertEqual(sorted(rg_case.splitlines()), sorted(py_case.splitlines()))
+        self.assertIn("alpha.txt:1: needle alpha", rg_result.splitlines())
+        self.assertIn("sub/gamma.txt:2: needle gamma", rg_result.splitlines())
+        self.assertIn("beta.txt:1: NEEDLE upper", rg_result.splitlines())  # case-insensitive default
+        self.assertIn("beta.txt:1: NEEDLE upper", rg_case.splitlines())  # case-sensitive
+        self.assertNotIn("needle alpha", rg_case)
+
+    def test_grep_cap_sentinel_on_both_engines(self):
+        """The cap sentinel guarantee holds for rg AND the Python fallback."""
+        self.make("many.txt", "".join(f"needle {i}\n" for i in range(1, 3001)))
+        self.make("sub/sentinel.txt", "needle sentinel\n")
+        results = [self.reg.execute("grep", {"pattern": "needle"})]
+        with mock.patch("harness.tools.shutil.which", return_value=None):
+            results.append(self.reg.execute("grep", {"pattern": "needle"}))
+        for result in results:
+            self.assertLessEqual(len(result), MAX_RESULT_CHARS + len(TRUNCATED_SUFFIX))
+            self.assertTrue(result.endswith(TRUNCATED_SUFFIX))
+            self.assertTrue(result.startswith("many.txt:1: needle 1"))
+            self.assertNotIn("sentinel", result)
+
+    def test_grep_backreference_falls_back_to_python(self):
+        # rg rejects backreferences (exit 2) -> the Python fallback runs, where
+        # the pattern is valid and matches. Prove the fallback by comparing
+        # with the forced-Python result.
+        self.make("x.txt", "aa\n")
+        rg_path = self.reg.execute("grep", {"pattern": r"(a)\1"})
+        with mock.patch("harness.tools.shutil.which", return_value=None):
+            py_path = self.reg.execute("grep", {"pattern": r"(a)\1"})
+        self.assertEqual(rg_path, py_path)
+        self.assertEqual(rg_path, "x.txt:1: aa")
+
+    def test_grep_invalid_pattern_reports_error_via_fallback(self):
+        # A pattern invalid for both engines surfaces as an error string from
+        # the Python fallback — not a crash and not a raw rg error.
+        self.make("x.txt", "aa\n")
+        result = self.reg.execute("grep", {"pattern": "[z-a]"})
+        self.assertIn("invalid regex", result)
 
 
 if __name__ == "__main__":

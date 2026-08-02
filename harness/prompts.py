@@ -17,6 +17,8 @@ FIXED_PREFIX: str = (
     "Tool use:\n"
     "When you need a fact or a file operation, call a tool. You may batch "
     "independent tool calls. The harness parses your DSML tool calls automatically.\n"
+    "To delegate a self-contained sub-task, call `spawn_agent` and synthesize "
+    "its JSON summary into your answer.\n"
     "\n"
     "Output contract:\n"
     "Final answers are plain text. Never emit tool markup, `reasoning_content`, "

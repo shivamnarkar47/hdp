@@ -9,6 +9,7 @@ prompt is the multi-line TextArea; Enter submits it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 import time
@@ -121,6 +122,37 @@ class TestTui(unittest.TestCase):
                 self.assertIn("Wrote hello.txt.", transcript)
                 self.assertTrue(any(line.startswith("⚙") for line in app.transcript))
                 self.assertEqual((self.root / "hello.txt").read_text(encoding="utf-8"), "hi")
+
+        asyncio.run(flow())
+
+    def test_verify_hook_renders_dim_line(self):
+        """A hooks file + a mutating turn renders the dim `🧪 verify` pane line
+        (fast hook: python -c print)."""
+        async def flow() -> None:
+            hooks = self.root / ".hdp" / "hooks.json"
+            hooks.parent.mkdir(parents=True, exist_ok=True)
+            hooks.write_text(
+                json.dumps({"verify": ["python", "-c", "print('verify-ok')"]}),
+                encoding="utf-8",
+            )
+            app = self._app()
+            async with app.run_test() as pilot:
+                await self._submit_and_wait(app, "write hello.txt", pilot)
+                self.assertFalse(app.turn_active)
+                transcript = "".join(app.transcript)
+                self.assertIn("🧪 verify: verify-ok", transcript)
+
+        asyncio.run(flow())
+
+    def test_verify_off_without_hooks_file(self):
+        """No hooks file: the verify hook never runs, no pane line."""
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                await self._submit_and_wait(app, "write hello.txt", pilot)
+                self.assertFalse(app.turn_active)
+                transcript = "".join(app.transcript)
+                self.assertNotIn("🧪 verify", transcript)
 
         asyncio.run(flow())
 

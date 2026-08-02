@@ -1,7 +1,9 @@
 """Wire message model tests."""
 
+import json
 import unittest
 
+from harness.context import estimate_tokens, wire_token_count
 from harness.messages import (
     AssistantMessage,
     SystemMessage,
@@ -9,6 +11,7 @@ from harness.messages import (
     ToolResultMessage,
     UserMessage,
     to_wire_messages,
+    wire_token_cost,
 )
 
 
@@ -53,3 +56,30 @@ class TestMessages(unittest.TestCase):
 
     def test_user_wire(self):
         self.assertEqual(UserMessage("hello").to_wire(), {"role": "user", "content": "hello"})
+
+
+class TestWireTokenCost(unittest.TestCase):
+    def _sample_wire(self):
+        messages = [
+            SystemMessage("you are hdp — the harness agent"),
+            UserMessage("read the file, then summarize it carefully"),
+            AssistantMessage(
+                content="Let me look.",
+                reasoning_content="first read, then summarize",
+                tool_calls=[ToolCall("c1", "read", '{"path": "a.txt"}')],
+            ),
+            ToolResultMessage("c1", "file contents here"),
+        ]
+        return to_wire_messages(messages)
+
+    def test_matches_sum_of_per_message_costs(self):
+        wire = self._sample_wire()
+        expected = sum(estimate_tokens(json.dumps(m, ensure_ascii=False)) for m in wire)
+        self.assertEqual(wire_token_cost(wire), expected)
+
+    def test_empty_wire_costs_zero(self):
+        self.assertEqual(wire_token_cost([]), 0)
+
+    def test_context_wire_token_count_delegates(self):
+        wire = self._sample_wire()
+        self.assertEqual(wire_token_count(wire), wire_token_cost(wire))

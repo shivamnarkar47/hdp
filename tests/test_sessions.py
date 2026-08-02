@@ -9,6 +9,7 @@ from pathlib import Path
 
 from harness.sessions import (
     append_event,
+    append_events,
     delete_session,
     get_store_dir,
     list_sessions,
@@ -80,6 +81,56 @@ class TestReadEvents(SessionStoreTestCase):
         )
         events = read_events(sid)
         self.assertEqual([e["data"]["content"] for e in events], ["ok", "hi"])
+
+
+class TestAppendEvents(SessionStoreTestCase):
+    def test_bulk_round_trip_in_order(self):
+        sid = new_session_id()
+        append_events(
+            sid,
+            [
+                {"type": "user", "data": {"content": "hello"}},
+                {"type": "assistant", "data": {"content": "hi"}},
+                {"type": "tool_call", "data": {"id": "c1", "name": "read", "arguments": "{}"}},
+                {"type": "tool_result", "data": {"tool_call_id": "c1", "content": "ok"}},
+            ],
+        )
+        events = read_events(sid)
+        self.assertEqual(
+            [e["type"] for e in events], ["user", "assistant", "tool_call", "tool_result"]
+        )
+        self.assertEqual(events[0]["data"], {"content": "hello"})
+        self.assertEqual(events[1]["data"], {"content": "hi"})
+        self.assertEqual(
+            events[2]["data"], {"id": "c1", "name": "read", "arguments": "{}"}
+        )
+        self.assertEqual(events[3]["data"], {"tool_call_id": "c1", "content": "ok"})
+        self.assertTrue(all(e["ts"] for e in events))
+
+    def test_invalid_type_raises_and_writes_nothing(self):
+        sid = new_session_id()
+        with self.assertRaises(ValueError):
+            append_events(
+                sid,
+                [
+                    {"type": "user", "data": {"content": "ok"}},
+                    {"type": "bogus", "data": {}},
+                ],
+            )
+        # All events are validated before anything touches the store.
+        self.assertEqual(read_events(sid), [])
+
+    def test_empty_batch_is_noop(self):
+        sid = new_session_id()
+        append_events(sid, [])
+        self.assertEqual(read_events(sid), [])
+
+    def test_append_event_is_a_wrapper(self):
+        sid = new_session_id()
+        append_event(sid, {"type": "user", "data": {"content": "x"}})
+        append_event(sid, {"type": "meta", "data": {"kind": "start"}})
+        events = read_events(sid)
+        self.assertEqual([e["type"] for e in events], ["user", "meta"])
 
 
 class TestDeleteSession(SessionStoreTestCase):
