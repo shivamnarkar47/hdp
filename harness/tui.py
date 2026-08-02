@@ -466,6 +466,9 @@ class AgentsScreen(ModalScreen[tuple[str, str] | str | None]):
 
     Dismisses with a payload the app's result callback understands:
     ``("activate", name)`` | ``("delete", name)`` | ``"new"`` | None (Esc).
+    The currently-active agent's row is marked with a ``✓`` before its name
+    and styled accent/bold; each row is two lines (bold name + dim, fully
+    wrapped description).
     """
 
     BINDINGS = [
@@ -474,26 +477,32 @@ class AgentsScreen(ModalScreen[tuple[str, str] | str | None]):
         Binding("d", "delete", "Delete"),
     ]
 
-    def __init__(self, agent_list: list[dict]) -> None:
+    def __init__(self, agent_list: list[dict], active_name: str | None = None) -> None:
         super().__init__()
         self._agents = agent_list
+        self._active_name = active_name
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="sessions-box"):
-            yield Static("Agents", classes="connect-title")
+        with Vertical(id="agents-box"):
+            yield Static(f"Agents ({len(self._agents)})", classes="connect-title")
             if self._agents:
-                yield ListView(
-                    *[
-                        ListItem(Label(f"{a['name']} — {a.get('description', '')[:40]}"))
-                        for a in self._agents
-                    ],
-                    id="agent-list",
-                )
+                yield ListView(*[self._row(a) for a in self._agents], id="agent-list")
             else:
                 yield Static("(no agents — press n to create)", classes="connect-hint")
             yield Static(
-                "Enter activate · n new · d delete · Esc close", classes="connect-hint"
+                "↑/↓ select · Enter activate · n new · d delete · Esc close",
+                classes="connect-hint",
             )
+
+    def _row(self, agent: dict) -> ListItem:
+        name = agent.get("name", "")
+        description = agent.get("description", "")
+        is_active = agent.get("name") == self._active_name
+        name_label = Label(
+            (f"✓ {name}" if is_active else name),
+            classes="agent-name active" if is_active else "agent-name",
+        )
+        return ListItem(Vertical(name_label, Label(description, classes="agent-desc")))
 
     def on_mount(self) -> None:
         if self._agents:
@@ -745,13 +754,45 @@ class HarnessTui(App):
     }
 
     #connect-box,
-    #sessions-box {
+    #sessions-box,
+    #agents-box {
         width: 52;
         height: auto;
         max-height: 80%;
         border: round $accent;
         background: $panel;
         padding: 1 2;
+    }
+
+    #agents-box {
+        width: 60;
+        max-height: 60%;
+    }
+
+    #session-list {
+        height: auto;
+        max-height: 50%;
+        margin-bottom: 1;
+    }
+
+    #agent-list {
+        height: auto;
+        max-height: 12;
+        margin-bottom: 1;
+    }
+
+    #agent-list .agent-name {
+        text-style: bold;
+    }
+
+    #agent-list .agent-name.active {
+        color: $accent;
+        text-style: bold;
+    }
+
+    #agent-list .agent-desc {
+        color: $text-muted;
+        text-style: dim;
     }
 
     .connect-title {
@@ -774,13 +815,6 @@ class HarnessTui(App):
 
     #connect-buttons Button {
         width: 1fr;
-    }
-
-    #session-list,
-    #agent-list {
-        height: auto;
-        max-height: 50%;
-        margin-bottom: 1;
     }
 
     .banner-title {
@@ -854,6 +888,9 @@ class HarnessTui(App):
         self.resume_next = False
         self._cancel_turn = False
         self.turn_active = False
+        # AI agent generator in flight (Ctrl+G or the /agents -> n form):
+        # guards against two overlapping generator workers.
+        self._generating_agent = False
         self.verbose = False
         self.prompt_history: list[str] = []
         self._history_index: int | None = None
@@ -1542,12 +1579,29 @@ class HarnessTui(App):
         self._render_status()  # the bar leads with the active agent's name
 
     def _add_agent(self, agent: dict, notice: str | None = None) -> None:
-        """Add a new agent, activate it, persist, and confirm."""
+        """Add a new agent, activate it, persist, and confirm.
+
+        Dedupes case-insensitively by name: an existing name is REPLACED in
+        place (its position kept) instead of appended, so overlapping
+        generators or a same-name re-run can never accumulate duplicates.
+        """
+        name = agent["name"]
+        for i, existing in enumerate(self._agents["agents"]):
+            if existing.get("name", "").lower() == name.lower():
+                self._agents["agents"][i] = agent
+                self._agents["active"] = name
+                agents.save(self.project_dir, self._agents)
+                self._active_agent = agents.active_agent(self._agents)
+                self._write_line(
+                    f"agent: {name} created (replaced existing)", classes="notice"
+                )
+                self._render_status()
+                return
         self._agents["agents"].append(agent)
-        self._agents["active"] = agent["name"]
+        self._agents["active"] = name
         agents.save(self.project_dir, self._agents)
         self._active_agent = agents.active_agent(self._agents)
-        self._write_line(notice or f"agent: {agent['name']} added and active", classes="notice")
+        self._write_line(notice or f"agent: {name} added and active", classes="notice")
         self._render_status()
 
     def _delete_agent(self, name: str) -> None:
@@ -1566,6 +1620,9 @@ class HarnessTui(App):
 
     def action_agent_intent(self) -> None:
         """Ctrl+G: open the AI agent generator (gateway completion, no tools)."""
+        if self._generating_agent:
+            self._write_line("agent generator: already running", classes="notice")
+            return
         if self.turn_active:
             self._write_line("(busy — wait for the current turn)", classes="notice")
             return
@@ -1590,7 +1647,15 @@ class HarnessTui(App):
         wording. On success the new agent is added + activated + persisted;
         on failure a notice is written, no crash. The thinking indicator
         stays up until the worker marshals the result back (call_from_thread).
+
+        Re-entry guard: while a generator is already in flight (or a turn is
+        active) a second start is refused with a notice, so two overlapping
+        workers can never both land an agent.
         """
+        if self._generating_agent or self.turn_active:
+            self._write_line("agent generator: already running", classes="notice")
+            return
+        self._generating_agent = True
         self.turn_active = True  # guards re-entry (action_agent_intent)
         self._show_thinking()
         # run_worker takes no worker args (Textual 8.x), so the generator
@@ -1628,6 +1693,7 @@ class HarnessTui(App):
     def _on_generator_done(self, reply: str, phrase: str) -> None:
         """Main thread: parse the reply; add + activate on success."""
         self.turn_active = False
+        self._generating_agent = False
         self._hide_thinking()
         agent = _parse_agent_json(reply)
         if agent is None:
@@ -1640,6 +1706,7 @@ class HarnessTui(App):
     def _on_generator_error(self, message: str) -> None:
         """Main thread: generator failure — dim notice, no crash."""
         self.turn_active = False
+        self._generating_agent = False
         self._hide_thinking()
         self._write_line(f"agent generator: {message}", classes="error-box")
 
@@ -1813,7 +1880,11 @@ class HarnessTui(App):
             self._refresh_sessions()
         elif cmd == "/agents":
             self.push_screen(
-                AgentsScreen(self._agents.get("agents", [])), self._on_agents_result
+                AgentsScreen(
+                    self._agents.get("agents", []),
+                    self._agents.get("active"),
+                ),
+                self._on_agents_result,
             )
         elif cmd == "/connect":
             if arg:

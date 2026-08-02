@@ -23,6 +23,7 @@ from textual.widgets import Input, Label, ListView, Static, TextArea
 from harness import agents, config, sessions
 from harness.art import BANNER_TAGLINE, BANNER_TITLE, SEA_LION
 from harness.tui import (
+    AGENT_GENERATOR_SYSTEM_PROMPT,
     AgentFormScreen,
     AgentIntentScreen,
     AgentsScreen,
@@ -440,6 +441,268 @@ class TestTui(unittest.TestCase):
                     if not app.turn_active:
                         break
                     await pilot.pause(0.05)
+
+        asyncio.run(flow())
+
+    def test_form_flow_adds_exactly_one_agent(self):
+        """Flow A (form): /agents -> n -> description -> Enter must add EXACTLY
+        ONE agent — Karna appears exactly once in state."""
+        async def flow() -> None:
+            script = [
+                (
+                    "content",
+                    '{"name": "Karna", "description": "the relentless executor"}',
+                ),
+                ("done", "stop"),
+            ]
+            app = HarnessTui(
+                gateway=FakeGateway(script),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                before = len(app._agents["agents"])
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/agents"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("n")  # new -> the form appears
+                await pilot.pause()
+                self.assertIsInstance(app.screen, AgentFormScreen)
+                desc_input = app.screen.query_one("#agent-desc-input", Input)
+                desc_input.value = "a relentless executor who never stops"
+                desc_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")  # save -> AI generation
+                for _ in range(200):  # up to ~10s
+                    if any("created and active" in line for line in app.transcript):
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                names = [a["name"] for a in app._agents["agents"]]
+                self.assertEqual(len(app._agents["agents"]), before + 1)
+                self.assertEqual(names.count("Karna"), 1)
+
+        asyncio.run(flow())
+
+    def test_ctrl_g_flow_adds_exactly_one_agent(self):
+        """Flow B (Ctrl+G): intent -> Enter must add EXACTLY ONE agent."""
+        async def flow() -> None:
+            script = [
+                (
+                    "content",
+                    '{"name": "Karna", "description": "the relentless executor"}',
+                ),
+                ("done", "stop"),
+            ]
+            app = HarnessTui(
+                gateway=FakeGateway(script),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                before = len(app._agents["agents"])
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, AgentIntentScreen)
+                intent_input = app.screen.query_one("#agent-intent-input", Input)
+                intent_input.value = "a relentless executor who never stops"
+                intent_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):  # up to ~10s
+                    if any("generated and active" in line for line in app.transcript):
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                names = [a["name"] for a in app._agents["agents"]]
+                self.assertEqual(len(app._agents["agents"]), before + 1)
+                self.assertEqual(names.count("Karna"), 1)
+
+        asyncio.run(flow())
+
+    def test_generator_reentry_guarded(self):
+        """Two generator runs started in quick succession (before either
+        worker completes) run EXACTLY ONE generator: the second start is
+        refused with a notice, and the list gains one agent."""
+        class CountingGateway:
+            """Servable by concurrent stream() calls; counts invocations."""
+            model_id = "fake-model"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream(self, messages, tools=None, max_tokens=None):
+                self.calls += 1
+                yield (
+                    "content",
+                    '{"name": "Karna", "description": "the relentless executor"}',
+                )
+                time.sleep(0.4)  # both workers in flight before done
+                yield ("done", "stop")
+
+        async def flow() -> None:
+            gateway = CountingGateway()
+            app = HarnessTui(
+                gateway=gateway,
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                before = len(app._agents["agents"])
+                # Two rapid starts before either worker completes.
+                app._generate_agent(
+                    "an executor",
+                    AGENT_GENERATOR_SYSTEM_PROMPT,
+                    "generated and active",
+                )
+                app._generate_agent(
+                    "an executor",
+                    AGENT_GENERATOR_SYSTEM_PROMPT,
+                    "generated and active",
+                )
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause(0.6)  # let any second completion land
+                # Exactly one generator stream ran; the second was refused.
+                self.assertEqual(gateway.calls, 1)
+                self.assertIn(
+                    "agent generator: already running", "\n".join(app.transcript)
+                )
+                names = [a["name"] for a in app._agents["agents"]]
+                self.assertEqual(names.count("Karna"), 1)
+                self.assertEqual(len(app._agents["agents"]), before + 1)
+
+        asyncio.run(flow())
+
+    def test_generator_empty_reply_notice(self):
+        """An empty generator reply (no content chunks) is handled: the
+        existing 'could not parse' notice, no crash, no agent added."""
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway([("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                before = len(app._agents["agents"])
+                app._generate_agent(
+                    "an executor",
+                    AGENT_GENERATOR_SYSTEM_PROMPT,
+                    "generated and active",
+                )
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                self.assertIn(
+                    "agent generator: could not parse a name/description",
+                    "\n".join(app.transcript),
+                )
+                self.assertEqual(len(app._agents["agents"]), before)
+                self.assertFalse(app.turn_active)
+
+        asyncio.run(flow())
+
+    def test_duplicate_name_replaced(self):
+        """A generator returning the SAME name as an existing agent replaces
+        that entry in place (list length unchanged), updates the description,
+        and activates it — no duplicate accumulates."""
+        async def flow() -> None:
+            script = [
+                (
+                    "content",
+                    '{"name": "Yudhishthira", "description": "the brand-new dharma"}',
+                ),
+                ("done", "stop"),
+            ]
+            app = HarnessTui(
+                gateway=FakeGateway(script),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                before = len(app._agents["agents"])
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/agents"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("n")  # new -> the form appears
+                await pilot.pause()
+                desc_input = app.screen.query_one("#agent-desc-input", Input)
+                desc_input.value = "a new take on dharma"
+                desc_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")  # save -> AI generation
+                for _ in range(200):  # up to ~10s
+                    if any("replaced existing" in line for line in app.transcript):
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                # Length unchanged; the existing entry was replaced in place.
+                self.assertEqual(len(app._agents["agents"]), before)
+                yudi = [
+                    a
+                    for a in app._agents["agents"]
+                    if a["name"] == "Yudhishthira"
+                ]
+                self.assertEqual(len(yudi), 1)  # exactly one Yudhishthira
+                self.assertEqual(yudi[0]["description"], "the brand-new dharma")
+                self.assertEqual(app._active_agent["name"], "Yudhishthira")
+                self.assertIn(
+                    "agent: Yudhishthira created (replaced existing)",
+                    "\n".join(app.transcript),
+                )
+                self.assertFalse(app.turn_active)
+
+        asyncio.run(flow())
+
+    def test_agents_popup_design(self):
+        """The /agents popup: count title, the active agent's row starts with
+        a ✓ marker, and rows are two-line (full description present — a
+        substring beyond 40 chars renders)."""
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                # Startup auto-activation: Yudhishthira is active (first row).
+                self.assertEqual(app._active_agent["name"], "Yudhishthira")
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/agents"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, AgentsScreen)
+                # Count title.
+                title = str(app.screen.query_one(".connect-title", Static).render())
+                self.assertRegex(title, r"^Agents \(\d+\)$")
+                # The agents box uses its dedicated (wider) styling.
+                self.assertIsNotNone(app.screen.query_one("#agents-box"))
+                list_view = app.screen.query_one("#agent-list", ListView)
+                first_row = list_view.children[0]
+                # Two-line row: a bold name label and a full-description label.
+                labels = list(first_row.query(Label))
+                self.assertGreaterEqual(len(labels), 2)
+                # The active (first: Yudhishthira) row's name starts with ✓.
+                self.assertTrue(str(labels[0].render()).startswith("✓ Yudhishthira"))
+                # The description line carries the FULL description — a
+                # substring beyond the old 40-char truncation appears.
+                self.assertIn("never cuts corners", str(labels[1].render()))
+                # The hint line documents every binding.
+                hint = str(app.screen.query_one(".connect-hint", Static).render())
+                self.assertIn("↑/↓ select", hint)
+                self.assertIn("n new", hint)
+                self.assertIn("d delete", hint)
 
         asyncio.run(flow())
 
