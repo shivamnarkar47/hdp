@@ -26,9 +26,14 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
     Markdown,
     Static,
     TabbedContent,
@@ -73,6 +78,7 @@ COMMANDS = [
     "/memory",
     "/model",
     "/verbose",
+    "/connect",
     "/quit",
 ]
 
@@ -248,6 +254,103 @@ class ConversationScroll(VerticalScroll):
         super().action_scroll_end()
 
 
+class ConnectScreen(ModalScreen[str | None]):
+    """Modal popup for entering the OpenCode Zen/Go API key.
+
+    Dismisses with the entered key on Save, or None on Cancel/Esc.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "save", "Save"),
+    ]
+
+    def __init__(self, existing: str | None = None) -> None:
+        super().__init__()
+        self._existing = existing
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connect-box"):
+            yield Static("OpenCode Zen/Go API key", classes="connect-title")
+            if self._existing:
+                masked = "sk-••••" + self._existing[-4:]
+                yield Static(f"(key already set: {masked})", classes="connect-hint")
+            yield Input(id="key-input", placeholder="sk-…", password=True)
+            with Horizontal(id="connect-buttons"):
+                yield Button("Save", variant="primary", id="save-btn")
+                yield Button("Cancel", id="cancel-btn")
+
+    def on_mount(self) -> None:
+        self.query_one("#key-input", Input).focus()
+
+    @on(Input.Submitted)
+    def _on_key_submitted(self, event: Input.Submitted) -> None:
+        self._save()
+
+    @on(Button.Pressed)
+    def _on_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "save-btn":
+            self._save()
+        elif event.button.id == "cancel-btn":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_save(self) -> None:
+        self._save()
+
+    def _save(self) -> None:
+        key = self.query_one("#key-input", Input).value.strip()
+        if not key:
+            self.query_one("#key-input", Input).focus()  # guard empty input
+            return
+        self.dismiss(key)
+
+
+class SessionsScreen(ModalScreen[str | None]):
+    """Modal session switcher: Enter resumes the highlighted session.
+
+    Dismisses with the chosen session id, or None on Cancel/Esc.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+    ]
+
+    def __init__(self, entries: list[dict]) -> None:
+        super().__init__()
+        self._entries = entries
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sessions-box"):
+            yield Static("Sessions", classes="connect-title")
+            if self._entries:
+                yield ListView(
+                    *[
+                        ListItem(Label(f"{e['id']}  {(e['prompt'] or '')[:50]}"))
+                        for e in self._entries
+                    ],
+                    id="session-list",
+                )
+            else:
+                yield Static("(no sessions yet)", classes="connect-hint")
+            yield Static("Enter resume · Esc close", classes="connect-hint")
+
+    def on_mount(self) -> None:
+        if self._entries:
+            self.query_one("#session-list", ListView).focus()
+
+    @on(ListView.Selected)
+    def _on_selected(self, event: ListView.Selected) -> None:
+        index = self.query_one("#session-list", ListView).index
+        entry = self._entries[index]
+        self.dismiss(entry["id"])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HarnessTui(App):
     """Split-pane chat TUI for hdp."""
 
@@ -389,6 +492,49 @@ class HarnessTui(App):
         color: $text-muted;
         text-style: dim;
         margin: 0 0 1 0;
+    }
+
+    ConnectScreen,
+    SessionsScreen {
+        align: center middle;
+    }
+
+    #connect-box,
+    #sessions-box {
+        width: 52;
+        height: auto;
+        max-height: 80%;
+        border: round $accent;
+        background: $panel;
+        padding: 1 2;
+    }
+
+    .connect-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    .connect-hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+
+    #connect-box Input {
+        margin-bottom: 1;
+    }
+
+    #connect-buttons {
+        height: auto;
+    }
+
+    #connect-buttons Button {
+        width: 1fr;
+    }
+
+    #session-list {
+        height: auto;
+        max-height: 50%;
+        margin-bottom: 1;
     }
     """
 
@@ -881,8 +1027,8 @@ class HarnessTui(App):
                 Button(label, classes="session-btn", action=f"resume_session({sid!r})")
             )
 
-    def action_resume_session(self, sid: str) -> None:
-        """Resume a session from a sidebar Sessions row click."""
+    def _resume_session(self, sid: str) -> None:
+        """Switch the active session and continue from its history."""
         if self.turn_active:
             self._write_line("(busy — finish or cancel the current turn first)", classes="notice")
             return
@@ -891,6 +1037,26 @@ class HarnessTui(App):
         self.sub_title = f"{self.model_id} · {self.session_id}"
         self._write_line(f"resuming {sid}")
         self._render_status()
+
+    def action_resume_session(self, sid: str) -> None:
+        """Resume a session from a sidebar Sessions row click."""
+        self._resume_session(sid)
+
+    def _on_session_selected(self, sid: str | None) -> None:
+        """Result callback from the /sessions popup (None = dismissed)."""
+        if sid:
+            self._resume_session(sid)
+
+    def _set_api_key(self, key: str) -> None:
+        """Persist a key, rebuild the gateway, confirm (never echo the key)."""
+        config.save_user_api_key(key)
+        self.gateway = Gateway(config.BASE_URL, key, self.model_id)
+        self._write_line("connected: API key saved")
+
+    def _on_connect_result(self, key: str | None) -> None:
+        """Result callback from the /connect popup (None = cancelled)."""
+        if key:
+            self._set_api_key(key)
 
     # -- status bar ---------------------------------------------------------
 
@@ -956,11 +1122,18 @@ class HarnessTui(App):
             self._refresh_sessions()
             self._render_status()
         elif cmd == "/sessions":
-            for entry in sessions.list_sessions():
-                self._write_line(
-                    f"{entry['id']}  {entry['ts'] or '-'}  {(entry['prompt'] or '')[:60]}"
-                )
+            entries = sorted(
+                sessions.list_sessions(), key=lambda e: e["id"], reverse=True
+            )
+            self.push_screen(SessionsScreen(entries), self._on_session_selected)
             self._refresh_sessions()
+        elif cmd == "/connect":
+            if arg:
+                self._set_api_key(arg)  # inline key, no popup
+            else:
+                self.push_screen(
+                    ConnectScreen(config.load_user_api_key()), self._on_connect_result
+                )
         elif cmd == "/memory":
             digest = self.memory.load_digest()
             if digest:
@@ -983,7 +1156,8 @@ class HarnessTui(App):
 
     def _help(self) -> None:
         self._write_line(
-            "commands: /help /new /resume <id> /sessions /memory /model /verbose /quit"
+            "commands: /help /new /resume <id> /sessions /memory /model /verbose "
+            "/connect /quit"
         )
         self._write_line(
             "keys: enter send · shift+enter newline · ctrl+p/n history · "
@@ -993,7 +1167,14 @@ class HarnessTui(App):
 
 def main() -> None:
     """Launch the TUI (the default `hdp` surface)."""
-    HarnessTui().run()
+    app = HarnessTui()
+    app.run()
+    # Textual has restored the terminal by now; print the resume hint using
+    # the app's last session id (so /new or /resume mid-session is reflected).
+    print(
+        f"Session {app.session_id} — resume with: hdp run --resume {app.session_id}  "
+        f"(or /resume {app.session_id} in the TUI)"
+    )
 
 
 if __name__ == "__main__":

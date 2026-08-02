@@ -1,5 +1,11 @@
 # HarnessDP
 
+[![python](https://img.shields.io/badge/python-3.12+-blue)](https://www.python.org/)
+[![last commit](https://img.shields.io/github/last-commit/shivamnarkar47/hdp)](https://github.com/shivamnarkar47/hdp)
+[![code size](https://img.shields.io/github/languages/code-size/shivamnarkar47/hdp)](https://github.com/shivamnarkar47/hdp)
+[![tests](https://img.shields.io/github/actions/workflow/status/shivamnarkar47/hdp/tests.yml?label=tests)](https://github.com/shivamnarkar47/hdp/actions)
+[![core stdlib only](https://img.shields.io/badge/core-stdlib%20only-green)](https://github.com/shivamnarkar47/hdp)
+
 hdp is a DeepSeek V4 Flash agent harness: a Textual TUI plus a `hdp run` CLI that drives gateway-backed agent sessions. The core is stdlib-only — `textual` is the only runtime dependency.
 
 ## Requirements
@@ -28,11 +34,28 @@ Both installers honor the `HDP_REPO_URL`, `HDP_INSTALL_DIR`, and `HDP_BIN_DIR` e
 - `hdp` — launch the Textual TUI
 - `hdp run "PROMPT"` — one-shot session from the CLI (`--dir`, `--model`, `--max-steps`, `--resume SESSION_ID`, `--json`, …)
 - `hdp sessions list` — list past sessions
-- TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/memory`, `/model`, `/verbose`, `/quit`
+- TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/connect`, `/memory`, `/model`, `/verbose`, `/quit`
+
+## How it works
+
+```mermaid
+flowchart TD
+    ENTRY["hdp run / TUI"] --> LOOP["AgentLoop — stream → heal → execute → persist"]
+    LOOP -->|"to_wire_messages() → stream()"| GW["Gateway (SSE, OpenAI-compatible)"]
+    GW -->|"content deltas"| DIALECT["DialectFeed — heal DSML envelopes"]
+    DIALECT -->|"ToolCall"| LOOP
+    LOOP -->|"execute()"| TOOLS["ToolRegistry — path-confined + DENY list"]
+    TOOLS --> BASH["bash — ≤300s, 10k-char cap"] & FS["read / write / edit / grep / glob"] & MAP["memory_append → .agent-memory/"]
+    LOOP -->|"persist / resume"| SESS["sessions JSONL"]
+    SESS -->|"replay history"| LOOP
+    GW -->|"wire body: no tool_choice / temperature / stream_options"| API["DeepSeek V4 Flash gateway"]
+    API -->|"SSE StreamEvents"| GW
+    LOOP -->|"answer"| OUT["done(answer) → exit 0"]
+```
 
 ## API key
 
-Set `OPENCODE_API_KEY` in your environment; otherwise the harness reads the omp auth store.
+Set `OPENCODE_API_KEY` in your environment, or save a key from the TUI with `/connect` (resolution order: env → saved key → omp auth store).
 
 ## Tests
 

@@ -57,7 +57,7 @@
 
 **Exit codes:** `0` answer produced · `1` config/key/gateway error · `2` loop error (max steps, context overflow, tool loop, 5 consecutive tool failures).
 
-**API key:** env `OPENCODE_API_KEY`, else omp auth store `~/.omp/agent/agent.db` (read-only sqlite), else exit 1 with instructions. Never cache or write it.
+**API key:** env `OPENCODE_API_KEY`, else the user key store `~/.config/harnessdp/api_key` (0600; saved from the TUI via `/connect`), else omp auth store `~/.omp/agent/agent.db` (read-only sqlite), else exit 1 with instructions. Never cache or write it outside `config.save_user_api_key`.
 
 **Sessions:** JSONL at `~/.local/share/harnessdp/sessions/` (override: env `HARNESSDP_SESSIONS_DIR`). Id format `%Y%m%d-%H%M%S` (`sessions.py`).
 
@@ -68,7 +68,8 @@
 | `/help` | list commands |
 | `/new` | fresh session id, clear pane |
 | `/resume <id>` | continue a session |
-| `/sessions` | list persisted sessions |
+| `/sessions` | popup session switcher (Enter resume · Esc close) |
+| `/connect` | popup to save the API key (or `/connect <key>` inline) |
 | `/memory` | show memory digest + file paths |
 | `/model` | show current model id |
 | `/verbose` | toggle reasoning display |

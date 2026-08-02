@@ -15,10 +15,10 @@ import time
 import unittest
 from pathlib import Path
 
-from textual.widgets import TextArea
+from textual.widgets import Input, Label, ListView, TextArea
 
-from harness import sessions
-from harness.tui import HarnessTui
+from harness import config, sessions
+from harness.tui import ConnectScreen, HarnessTui, SessionsScreen
 
 FW = "\uff5c"  # fullwidth vertical bar: DSML envelope delimiter
 
@@ -72,12 +72,18 @@ class TestTui(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self._old_sessions_dir = os.environ.get("HARNESSDP_SESSIONS_DIR")
         os.environ["HARNESSDP_SESSIONS_DIR"] = str(self.root / "sessions")
+        self._old_xdg = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.root / "config")
 
     def tearDown(self) -> None:
         if self._old_sessions_dir is None:
             os.environ.pop("HARNESSDP_SESSIONS_DIR", None)
         else:
             os.environ["HARNESSDP_SESSIONS_DIR"] = self._old_sessions_dir
+        if self._old_xdg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self._old_xdg
         self._tmp.cleanup()
 
     def _app(self) -> HarnessTui:
@@ -113,21 +119,60 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
-    def test_slash_sessions_lists_current_session(self):
+    def test_sessions_popup_resumes(self):
         async def flow() -> None:
             app = self._app()
             async with app.run_test() as pilot:
-                await self._submit_and_wait(app, "write hello.txt", pilot)
-                sid = app.session_id
-                app.query_one("#prompt", TextArea).text = "/sessions"
+                sessions.append_event(
+                    "20260802-120000", {"type": "user", "data": {"content": "first"}}
+                )
+                sessions.append_event(
+                    "20260802-130000", {"type": "user", "data": {"content": "second"}}
+                )
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/sessions"
+                prompt.focus()
                 await pilot.pause()
                 await pilot.press("enter")
-                for _ in range(200):  # up to ~10s
-                    if sid in "".join(app.transcript):
-                        break
-                    await pilot.pause(0.05)
-                self.assertIn(sid, "".join(app.transcript))
-                self.assertIn("write hello.txt", "".join(app.transcript))
+                await pilot.pause()
+                # The modal switcher is up with both sessions, newest first.
+                self.assertIsInstance(app.screen, SessionsScreen)
+                list_view = app.screen.query_one("#session-list", ListView)
+                self.assertEqual(len(list_view.children), 2)
+                first_row = str(list_view.children[0].query_one(Label).render())
+                self.assertIn("20260802-130000", first_row)
+                self.assertIn("second", first_row)
+                # Enter resumes the highlighted (newest) session.
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, SessionsScreen)
+                self.assertEqual(app.session_id, "20260802-130000")
+                self.assertTrue(app.resume_next)
+                self.assertIn("resuming 20260802-130000", "".join(app.transcript))
+
+        asyncio.run(flow())
+
+    def test_connect_popup(self):
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/connect"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ConnectScreen)
+                key_input = app.screen.query_one("#key-input", Input)
+                key_input.value = "sk-test123"
+                key_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")  # Input.Submitted -> Save
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, ConnectScreen)
+                self.assertEqual(app.gateway.api_key, "sk-test123")
+                self.assertEqual(config.user_key_path().read_text(), "sk-test123")
+                self.assertIn("connected: API key saved", "".join(app.transcript))
 
         asyncio.run(flow())
 
@@ -140,7 +185,9 @@ class TestTui(unittest.TestCase):
                 prompt.text = "/"
                 await pilot.pause()
                 self.assertTrue(app._suggestions_visible)
+                # 9 commands now, but the popup caps at 8 rows + a "…" row.
                 self.assertEqual(len(app._suggestion_rows), 8)
+                self.assertTrue(app._suggest_more)
                 for cmd in (
                     "/help",
                     "/new",
@@ -149,9 +196,13 @@ class TestTui(unittest.TestCase):
                     "/memory",
                     "/model",
                     "/verbose",
-                    "/quit",
+                    "/connect",
                 ):
                     self.assertIn(cmd, app._suggestion_rows)
+                # The capped command still resolves by prefix.
+                prompt.text = "/q"
+                await pilot.pause()
+                self.assertEqual(app._suggestion_rows, ["/quit"])
                 # Prefix filter narrows the list.
                 prompt.text = "/res"
                 await pilot.pause()
