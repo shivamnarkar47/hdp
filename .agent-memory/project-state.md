@@ -39,3 +39,21 @@ session: Who is Prime Minister of India → ok
 
 ## 2026-08-02 21:47
 session: Hi, what's my project about → ok
+
+## 2026-08-02 22:05
+session: Hi → ok
+
+## 2026-08-02 22:11
+session: OK, what's this project about → ok
+
+## 2026-08-02 22:58
+session: Who am I → ok
+
+## 2026-08-02 23:51
+session: List the top-level entries of this directory, using a tool. Answer in one short sentence. → ok
+
+## 2026-08-02 23:52
+session: Say 'two' → ok
+
+## 2026-08-02 23:52
+session: Say 'one' → ok
