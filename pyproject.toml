@@ -7,7 +7,7 @@ name = "harnessdp"
 version = "0.1.0"
 description = "hdp — a DeepSeek V4 Flash agent harness with a Textual TUI"
 requires-python = ">=3.12"
-dependencies = ["textual"]
+dependencies = ["textual", "textual-image"]
 
 [project.scripts]
 hdp = "harness.cli:main"
