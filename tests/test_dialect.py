@@ -68,6 +68,27 @@ THINK_SPAN = "<think>let me check</think>The weather is 18°C"
 
 UNCLOSED_SECTION = f'{SECTION_OPEN}{INVOKE_OPEN} name="x">'
 
+# The model QUOTES the envelope in prose (ASCII form, backticks) and keeps
+# writing — no close tag anywhere in the rest of the answer.
+PROSE_QUOTE = (
+    "The first sentence establishes context. "
+    "Now, quoting the wire format: `<|DSML|tool_calls>` "
+    "is what the model emits when it wants to call a tool. "
+    "This remaining part of the answer must be preserved "
+    "entirely, including this final clause."
+)
+
+# A FULL envelope (open + invoke + parameter + close) quoted inside prose.
+COMPLETE_PROSE_ENVELOPE = (
+    "Here is the complete envelope the model produces: "
+    "<|DSML|tool_calls>"
+    '<|DSML|invoke name="read">'
+    '<|DSML|parameter name="path" string="true">x</|DSML|parameter>'
+    "</|DSML|invoke>"
+    "</|DSML|tool_calls>"
+    " — that is all, and the trailing prose survives."
+)
+
 TRUNCATED_SUFFIX = "\u2026[parameter truncated]"  # fullwidth ellipsis …
 
 
@@ -133,12 +154,21 @@ class TestDialectFeed(unittest.TestCase):
 
     def test_leak_in_prose(self):
         events = DialectFeed().feed(LEAK_IN_PROSE)
-        self.assertEqual([kind for kind, _ in events], ["text", "tool_call", "text"])
-        self.assertEqual(events[0], ("text", "The answer is 42"))
-        self.assertEqual(events[2], ("text", " done"))
+        # The mid-answer envelope is a prose quote, not a real section: no
+        # tool call is healed.  The section open and the close tags are
+        # dropped as control tokens, but the invoke/parameter opens and the
+        # parameter value pass through as the text the model actually wrote;
+        # the whitespace after the section close is swallowed, so the joined
+        # text is the full input minus the open/close markers.
+        self.assertFalse(any(kind == "tool_call" for kind, _ in events))
         joined_text = "".join(payload for kind, payload in events if kind == "text")
-        self.assertNotIn("\uff5c", joined_text)
-        self.assertNotIn("DSML", joined_text)
+        self.assertEqual(
+            joined_text,
+            "The answer is 42"
+            f'{INVOKE_OPEN} name="get_weather">'
+            f'{PARAM_OPEN} name="location" string="true">San Francisco, CA'
+            "done",
+        )
 
     def test_leaked_chat_tokens(self):
         events = DialectFeed().feed(LEAKED_TOKENS)
@@ -154,10 +184,86 @@ class TestDialectFeed(unittest.TestCase):
     def test_unclosed_section_flush(self):
         feed = DialectFeed()
         self.assertEqual(feed.feed(UNCLOSED_SECTION), [])
+        # Generation-leading open with no complete invoke: recovered (nothing
+        # buffered, so no text event) rather than discarded.
         self.assertEqual(feed.flush(), [])
 
+    def test_prose_quote_mid_answer_preserves_rest(self):
+        # The old bug: a mid-answer quote of the envelope opened a real
+        # section, swallowed the REST of the stream, and flush() discarded it
+        # — the answer "stuck on half" right where the model quoted the wire
+        # format.  Now the quote is stripped and everything after survives.
+        feed = DialectFeed()
+        events = feed.feed(PROSE_QUOTE) + feed.flush()
+        self.assertFalse(any(kind == "tool_call" for kind, _ in events))
+        joined_text = "".join(payload for kind, payload in events if kind == "text")
+        self.assertIn("is what the model emits when it wants to call a tool.", joined_text)
+        self.assertIn("This remaining part of the answer must be preserved", joined_text)
+        self.assertTrue(joined_text.endswith("including this final clause."))
+        self.assertNotIn("DSML", joined_text)
+        self.assertNotIn("<|DSML|tool_calls>", joined_text)
+
+    def test_complete_prose_envelope_no_phantom_call(self):
+        # A FULL envelope quoted in prose: the old bug healed a phantom
+        # ToolCall from it, which the loop would have EXECUTED.  Now the open
+        # is stripped as a prose quote and the rest passes through as visible
+        # text — no tool call, trailing prose intact.
+        feed = DialectFeed()
+        events = feed.feed(COMPLETE_PROSE_ENVELOPE) + feed.flush()
+        self.assertFalse(any(kind == "tool_call" for kind, _ in events))
+        joined_text = "".join(payload for kind, payload in events if kind == "text")
+        self.assertIn("Here is the complete envelope the model produces: ", joined_text)
+        # The inner invoke/parameter opens and the parameter value pass
+        # through as the text the model wrote…
+        self.assertIn('<|DSML|invoke name="read">', joined_text)
+        self.assertIn('name="path" string="true">x', joined_text)
+        # …and the trailing prose survives (leading space swallowed with the
+        # section close's control-token handling).
+        self.assertTrue(joined_text.endswith("— that is all, and the trailing prose survives."))
+
+    def test_generation_leading_envelope_still_heals(self):
+        # Real envelopes are generation-leading: the FIRST thing in the feed
+        # is a full envelope (existing fixture 1 content) and it must still
+        # heal into a tool call.
+        feed = DialectFeed()
+        first = feed.feed(FULLWIDTH_SINGLE)
+        self.assertEqual([kind for kind, _ in first], ["tool_call"])
+        self.assertEqual(
+            first[0][1],
+            ToolCall("call_1", "get_weather", '{"location": "San Francisco, CA"}'),
+        )
+        # A LATER chunk in the same feed may quote the envelope in prose: the
+        # quote must not produce a second tool call, and the prose survives.
+        quote = "To be clear, the envelope looks like `<|DSML|tool_calls>` and that's it."
+        later = feed.feed(quote) + feed.flush()
+        self.assertFalse(any(kind == "tool_call" for kind, _ in later))
+        text = "".join(payload for kind, payload in later if kind == "text")
+        self.assertEqual(text, "To be clear, the envelope looks like `` and that's it.")
+
+    def test_think_span_then_envelope_still_heals(self):
+        # DeepSeek's chat template emits the envelope right after the think
+        # span — reasoning must NOT count as emitted text, or a real
+        # generation-leading envelope after </think> would be mistaken for a
+        # prose quote.
+        feed = DialectFeed()
+        events = feed.feed("<think>let me check</think>") + feed.feed(FULLWIDTH_SINGLE)
+        kinds = [kind for kind, _ in events]
+        self.assertIn("tool_call", kinds)
+        self.assertEqual(
+            next(payload for kind, payload in events if kind == "tool_call"),
+            ToolCall("call_1", "get_weather", '{"location": "San Francisco, CA"}'),
+        )
+
     def test_boundary_safety(self):
-        for fixture in (FULLWIDTH_SINGLE, ASCII_SINGLE, CHAINED, LEAK_IN_PROSE, THINK_SPAN):
+        for fixture in (
+            FULLWIDTH_SINGLE,
+            ASCII_SINGLE,
+            CHAINED,
+            LEAK_IN_PROSE,
+            PROSE_QUOTE,
+            COMPLETE_PROSE_ENVELOPE,
+            THINK_SPAN,
+        ):
             with self.subTest(fixture=repr(fixture[:40])):
                 whole = DialectFeed()
                 whole_events = whole.feed(fixture) + whole.flush()

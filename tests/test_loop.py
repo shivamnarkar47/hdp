@@ -63,8 +63,11 @@ class TestAgentLoop(unittest.TestCase):
     def test_two_turn_tool_call_flow(self):
         turn1 = [
             ("reasoning", "Let me check the directory"),
-            ("content", "I will write the file. "),
+            # Real envelopes are generation-leading: the envelope must be the
+            # FIRST content after the think span, or DialectFeed reads it as a
+            # prose quote of the envelope (see dialect.py Part A guard).
             ("content", DSML_WRITE),
+            ("content", "I will write the file. "),
             ("done", "tool_calls"),
         ]
         turn2 = [("content", "Wrote hello.txt."), ("done", "stop")]
@@ -149,8 +152,11 @@ class TestAgentLoop(unittest.TestCase):
     def test_sessions_round_trip(self):
         turn1 = [
             ("reasoning", "Let me check the directory"),
-            ("content", "I will write the file. "),
+            # Real envelopes are generation-leading: the envelope must be the
+            # FIRST content after the think span, or DialectFeed reads it as a
+            # prose quote of the envelope (see dialect.py Part A guard).
             ("content", DSML_WRITE),
+            ("content", "I will write the file. "),
             ("done", "tool_calls"),
         ]
         turn2 = [("content", "Wrote hello.txt."), ("done", "stop")]
@@ -174,8 +180,11 @@ class TestAgentLoop(unittest.TestCase):
     def test_structure_cache_refreshed_after_tools(self):
         turn1 = [
             ("reasoning", "Let me check the directory"),
-            ("content", "I will write the file. "),
+            # Real envelopes are generation-leading: the envelope must be the
+            # FIRST content after the think span, or DialectFeed reads it as a
+            # prose quote of the envelope (see dialect.py Part A guard).
             ("content", DSML_WRITE),
+            ("content", "I will write the file. "),
             ("done", "tool_calls"),
         ]
         turn2 = [("content", "Wrote hello.txt."), ("done", "stop")]
@@ -228,8 +237,11 @@ class TestAgentLoop(unittest.TestCase):
         """usage accumulates input+output tokens over a normal two-turn run."""
         turn1 = [
             ("reasoning", "Let me check the directory"),
-            ("content", "I will write the file. "),
+            # Real envelopes are generation-leading: the envelope must be the
+            # FIRST content after the think span, or DialectFeed reads it as a
+            # prose quote of the envelope (see dialect.py Part A guard).
             ("content", DSML_WRITE),
+            ("content", "I will write the file. "),
             ("done", "tool_calls"),
         ]
         turn2 = [("content", "Wrote hello.txt."), ("done", "stop")]
@@ -241,6 +253,59 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual(loop.usage["input_tokens"], sum(
             wire_token_count(calls[0]) for calls in gateway.calls
         ))
+
+    def test_prose_envelope_quote_not_truncated(self):
+        """A mid-answer quote of the DSML envelope must not swallow the rest.
+
+        Regression: the model explained the wire format in prose (backticked
+        ``<|DSML|tool_calls>``, no close tag).  DialectFeed used to treat the
+        quote as a real section open, swallow the remainder of the stream, and
+        discard it at flush() — the persisted answer was cut off mid-sentence
+        while finish_reason was ``stop``, so the partial answer was returned
+        as ok.  The complete-envelope variant used to heal a phantom
+        ToolCall that the loop would have EXECUTED (a ``write``!).
+        """
+        quoted = (
+            "Let me explain the wire format. The gateway streams the model's "
+            "output as SSE deltas, and when the model wants to call a tool it "
+            "emits an XML-style envelope `<|DSML|tool_calls>` followed by "
+            "invoke and parameter tags, which leak into the visible content "
+            "stream. Now, the important part: when the model quotes that "
+            "envelope in prose, the healer must not mistake the quote for a "
+            "real tool call, because doing so swallows everything that "
+            "follows and the answer sticks on half — cut off right where the "
+            "model explained the format. The rest of this answer must be "
+            "preserved completely, with every single word intact."
+        )
+        gateway = FakeGateway([("content", quoted), ("done", "stop")])
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
+        answer = loop.run("Explain the wire format")
+        self.assertTrue(answer.endswith("with every single word intact."))
+        self.assertNotIn("DSML", answer)
+        self.assertNotIn(FW, answer)
+        self.assertEqual(len(gateway.calls), 1)  # no tool turn was executed
+        self.assertFalse((self.tempdir / "hello.txt").exists())
+
+        # Variant 2: a COMPLETE envelope quoted inside prose — the old bug
+        # healed a phantom write call and executed it; now nothing runs and
+        # the full answer is returned.
+        complete = (
+            "The write tool writes files; its envelope looks like this: "
+            "<|DSML|tool_calls>"
+            '<|DSML|invoke name="write">'
+            '<|DSML|parameter name="path" string="true">hello.txt</|DSML|parameter>'
+            '<|DSML|parameter name="content" string="true">boom</|DSML|parameter>'
+            "</|DSML|invoke>"
+            "</|DSML|tool_calls>"
+            " — but that is just an example, I will not actually call it."
+        )
+        gateway2 = FakeGateway([("content", complete), ("done", "stop")])
+        loop2 = AgentLoop(gateway2, self.tools, self.memory, self.session_id + "-2")
+        answer2 = loop2.run("Show the envelope")
+        self.assertFalse((self.tempdir / "hello.txt").exists())  # nothing executed
+        self.assertIn("but that is just an example", answer2)
+        self.assertTrue(answer2.endswith("I will not actually call it."))
+        self.assertEqual(len(gateway2.calls), 1)
 
 
 if __name__ == "__main__":

@@ -134,7 +134,7 @@
 | `blocked by harness policy (destructive command)` | DENY list fired; re-run with `--allow-dangerous` only if intentional |
 | `old_text matches N times; pass all=true to replace all` | `edit` refuses ambiguous replaces |
 | `<think>…</think>` inside content | reasoning span — routed to `("reasoning", …)`, not answer text |
-| `Discarding unclosed DSML section…` (log) | envelope truncated mid-stream; `flush()` discarded it by design |
+| `Discarding unclosed DSML section…` (log) | unclosed envelope that parsed ≥1 invoke — `flush()` discards it (a malformed real call is better lost than executed); sections with **0 invokes** are now RECOVERED as visible text, not discarded (they were prose quotes of the envelope) |
 | `tool loop detected` / `5 consecutive tool failures` | loop aborted; exit 2 |
 | `(busy — Ctrl+C cancels the current turn)` | TUI turn in flight; input disabled until done |
 
@@ -146,7 +146,7 @@
 - **PITFALL: never send `tool_choice`, `temperature`, `stream_options`, or `store`.** This model rejects them (`gateway._build_body`); `test_build_body` asserts their absence.
 - **PITFALL: unicode markers are load-bearing.** ｜ = U+FF5C, ▁ = U+2581. Match them exactly (`FW = "\uff5c"`, `B = "\u2581"`; build fixtures from escapes, never paste glyphs). The model never trained on ASCII substitutes — transliterating breaks healing.
 - **PITFALL: reasoning replay is mandatory.** `AssistantMessage.to_wire()` re-sends `reasoning_content` when present; never synthesize a placeholder. Dropping it 400s on the next turn.
-- **PITFALL: call `DialectFeed.flush()` at end of stream** (the loop does); unclosed sections are deliberately discarded there, not raised.
+- **PITFALL: call `DialectFeed.flush()` at end of stream** (the loop does); unclosed sections that parsed ≥1 invoke are deliberately discarded there, not raised. Unclosed sections with 0 invokes are recovered as visible text — the model quoted the envelope in prose — and an envelope that follows any visible text in the same turn is treated as a prose quote, never healed (real envelopes are generation-leading).
 - **PITFALL: structured beats healed.** `calls = structured_calls if structured_calls else healed_calls` in `loop.py` — don't "fix" that precedence.
 - **PITFALL: tool results are strings.** 10k-char cap; `bash` timeout 30s default / 300s max; `grep` is case-insensitive unless `case:true`; `read` `offset` is 1-based.
 - **PITFALL: TUI thread rules.** The loop runs on a worker thread; that thread never touches widgets — events marshal via `call_from_thread`. Keep it that way. Streaming markdown re-renders the whole document per update, so the TUI accumulates chunks and flushes at most every ~100 ms (timer owned by the main thread); don't update the `Markdown` widget from the emit callback directly.

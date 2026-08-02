@@ -189,7 +189,8 @@ class DialectFeed:
 
     Feed content chunks to :meth:`feed` and collect the events it returns; call
     :meth:`flush` at end of stream to drain remaining buffered text (or to
-    discard an unclosed DSML section, per R8).
+    discard an unclosed DSML section that parsed at least one invoke, per R8 —
+    an unclosed section with no invokes is recovered as visible text).
     """
 
     def __init__(self) -> None:
@@ -198,6 +199,17 @@ class DialectFeed:
         self._swallow_ws = False  # drop leading whitespace after a stripped token
         self._call_counter = 0  # single counter; never resets across sections
         self._calls: list[ToolCall] = []  # completed calls of the current section
+        # Feed-lifetime flag: whether any visible text has already been emitted
+        # in this feed.  Real envelopes are always generation-leading, so a
+        # section open seen AFTER text was emitted is a prose QUOTE of the
+        # envelope, not a real section.  Persists across sections; reset only
+        # in __init__ (a later generation's leading envelope must still parse).
+        self._text_emitted = False
+        # Per-section counter of complete invokes parsed so far.  An unclosed
+        # section that never produced a call is a false positive (prose quote)
+        # and flush() recovers its buffer as visible text instead of
+        # discarding; a section with >= 1 invoke is discarded (R8).
+        self._section_invokes = 0
         # Current invoke context.
         self._invoke_name = ""
         self._args: dict[str, Any] = {}
@@ -217,12 +229,30 @@ class DialectFeed:
         return self._process()
 
     def flush(self) -> list[Event]:
-        """End of stream: drain remaining text, or discard an unclosed section."""
+        """End of stream: drain remaining text; an unclosed DSML section that
+        parsed at least one invoke is discarded (R8), while a section that
+        never produced a call is recovered as visible text — it was almost
+        certainly a prose quote of the envelope, not a real tool call."""
         events: list[Event] = []
         if self._swallow_ws:
             self._buffer = self._buffer.lstrip()
             self._swallow_ws = False
         if self._state in (_DSML_SECTION, _DSML_INVOKE, _DSML_PARAM):
+            if self._section_invokes == 0:
+                # False positive: no complete invoke was ever parsed, so this
+                # open was a prose quote of the envelope (or a real open
+                # truncated before its first call).  Recover the buffered
+                # bytes as visible text instead of discarding the answer.
+                logger.warning(
+                    "Recovered false-positive DSML section as text at end of "
+                    "stream (%d buffered chars, 0 calls parsed)",
+                    len(self._buffer),
+                )
+                if self._buffer:
+                    events.append(("text", _strip_controls(self._buffer)))
+                    self._buffer = ""
+                self._reset_section()
+                return events
             logger.warning(
                 "Discarding unclosed DSML section at end of stream "
                 "(%d buffered chars, %d calls parsed)",
@@ -243,6 +273,7 @@ class DialectFeed:
     # -- internals -------------------------------------------------------------
     def _reset_section(self) -> None:
         self._calls = []
+        self._section_invokes = 0
         self._invoke_name = ""
         self._args = {}
         self._param_value = []
@@ -281,19 +312,33 @@ class DialectFeed:
             if overlap:
                 if overlap < len(self._buffer):
                     events.append(("text", _strip_controls(self._buffer[:-overlap])))
+                    self._text_emitted = True
                     self._buffer = self._buffer[-overlap:]
                     return events, True
                 return events, False  # whole buffer is a partial token prefix
             events.append(("text", _strip_controls(self._buffer)))
+            self._text_emitted = True
             self._buffer = ""
             return events, True
         index, token = hit
         if index:
             events.append(("text", _strip_controls(self._buffer[:index])))
+            self._text_emitted = True
         self._buffer = self._buffer[index:]
         if matching_token(token, _SECTION_OPEN):
+            if self._text_emitted:
+                # The model QUOTED the envelope in prose (e.g. explaining the
+                # wire format): real envelopes are generation-leading, so this
+                # open cannot be a real section.  Strip it like a control token
+                # and stay outside — the invoke/parameter tags that follow are
+                # not outside-state tokens, so they pass through as the visible
+                # text the model actually wrote.
+                self._buffer = self._buffer[len(token) :]
+                self._swallow_ws = True
+                return events, True
             self._buffer = self._buffer[len(token) :]
             self._calls = []
+            self._section_invokes = 0
             self._state = _DSML_SECTION
             return events, True
         if token == _THINK_OPEN:
@@ -392,6 +437,7 @@ class DialectFeed:
                     json.dumps(self._args, ensure_ascii=False),
                 )
             )
+            self._section_invokes += 1
             self._state = _DSML_SECTION
             return events, True
         if starts_with_any(self._buffer, _PARAM_OPEN):

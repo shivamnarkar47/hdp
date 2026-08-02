@@ -39,8 +39,11 @@ def _write_envelope() -> str:
 
 TURN_TOOL = [
     ("reasoning", "Let me check"),
-    ("content", "Let me check the directory. "),
+    # Real envelopes are generation-leading: the envelope must be the FIRST
+    # content after the think span, or DialectFeed reads it as a prose quote
+    # of the envelope (see dialect.py Part A guard).
     ("content", _write_envelope()),
+    ("content", "Let me check the directory. "),
     ("done", "tool_calls"),
 ]
 TURN_STOP = [("content", "Wrote hello.txt."), ("done", "stop")]
