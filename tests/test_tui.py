@@ -21,7 +21,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, Label, ListView, Static, TextArea
 
 from harness import agents, config, sessions
-from harness.art import BANNER_TAGLINE, BANNER_TITLE, CHARIOT_WHEEL, SEA_LION
+from harness.art import BANNER_TAGLINE, BANNER_TITLE, SEA_LION
 from harness.tui import (
     AGENT_GENERATOR_SYSTEM_PROMPT,
     AgentFormScreen,
@@ -797,24 +797,13 @@ class TestTui(unittest.TestCase):
     def test_sea_lion_art_shape(self):
         lines = SEA_LION.splitlines()
         self.assertTrue(lines)
-    def test_sea_lion_art_shape(self):
-        lines = SEA_LION.splitlines()
-        self.assertGreaterEqual(len(lines), 1)
-        self.assertLessEqual(max(len(line) for line in lines), 80)
-        self.assertTrue(all("\t" not in line for line in lines))
+        self.assertLessEqual(len(lines), 26)
+        self.assertGreaterEqual(len(lines), 20)
+        for line in lines:
+            self.assertLessEqual(len(line), 80)
+            self.assertNotIn("\t", line)
         widths = [len(line) for line in lines]
         self.assertLessEqual(max(widths) - min(widths), 2)  # padded rectangle
-
-    def test_chariot_wheel_geometry(self):
-        lines = CHARIOT_WHEEL.splitlines()
-        # Krishna's chariot wheel: ~20-24 lines, each <= 80 cols, no tabs,
-        # and a true equal-width rectangle (unlike the sea lion's +-2).
-        self.assertGreaterEqual(len(lines), 1)
-        self.assertLessEqual(len(lines), 26)
-        self.assertTrue(all(len(line) <= 80 for line in lines))
-        self.assertTrue(all("\t" not in line for line in lines))
-        widths = [len(line) for line in lines]
-        self.assertEqual(len(set(widths)), 1)  # padded rectangle
 
     def test_home_banner(self):
         async def flow() -> None:
@@ -822,7 +811,6 @@ class TestTui(unittest.TestCase):
             async with app.run_test() as pilot:
                 await pilot.pause()
                 transcript = "\n".join(app.transcript)
-                self.assertIn(CHARIOT_WHEEL.splitlines()[10], transcript)  # hub line
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
@@ -842,7 +830,6 @@ class TestTui(unittest.TestCase):
                 self.assertEqual(app.session_id, "20260802-999999")
                 self.assertFalse(app.resume_next)
                 transcript = "\n".join(app.transcript)
-                self.assertIn(CHARIOT_WHEEL.splitlines()[10], transcript)  # hub line
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)

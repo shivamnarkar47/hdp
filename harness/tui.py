@@ -49,7 +49,7 @@ from textual.widgets import (
 )
 
 from harness import agents, config, sessions
-from harness.art import BANNER_TAGLINE, BANNER_TITLE, CHARIOT_WHEEL
+from harness.art import BANNER_TAGLINE, BANNER_TITLE
 from harness.gateway import Gateway, GatewayError
 from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
@@ -1343,20 +1343,17 @@ class HarnessTui(App):
     # -- conversation helpers -----------------------------------------------
 
     def _render_home(self) -> None:
-        """Render the chariot wheel + KESHAVLOK banner (startup and `/new`).
+        """Render the KESHAVLOK banner + welcome line (startup and `/new`).
 
-        Clears the pane and live-stream state, then mounts Krishna's chariot
-        wheel (the KESHAVLOK symbol) as a plain Static, the banner title
-        (accent/bold) and tagline (dim), and the welcome line — mirroring
-        every line into the transcript in order.
+        Clears the pane and live-stream state, then mounts the banner title
+        (accent/bold) and tagline (dim) as styled Statics, and mirrors every
+        line plus the welcome line into the transcript, in order.
         """
         self._conversation.remove_children()
         self.transcript.clear()
         self._follow = True
         self._reset_turn_stream()
         self._hide_thinking()
-        self.transcript.append(CHARIOT_WHEEL)
-        self._conversation.mount(Static(CHARIOT_WHEEL, classes="chariot-wheel", markup=False))
         self.transcript.append(BANNER_TITLE)
         self._conversation.mount(Static(BANNER_TITLE, classes="banner-title", markup=False))
         self.transcript.append(BANNER_TAGLINE)
