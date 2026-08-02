@@ -64,6 +64,21 @@ _ERROR_STARTS = (
     "denied",
 )
 
+# Slash commands offered by the suggestion popup (order is the popup order).
+COMMANDS = [
+    "/help",
+    "/new",
+    "/resume",
+    "/sessions",
+    "/memory",
+    "/model",
+    "/verbose",
+    "/quit",
+]
+
+# Braille spinner frames for the "thinking" indicator.
+THINK_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 
 class TurnCancelled(Exception):
     """Raised by the emit callback when the user cancels the active turn."""
@@ -87,9 +102,13 @@ class PromptInput(TextArea):
     """
 
     BINDINGS = [
-        # priority=True so Enter is checked in the App's priority pass before
-        # TextArea._on_key can consume it as a newline insert.
+        # priority=True so these are checked in the App's priority pass before
+        # TextArea's own key handling can consume them.
         Binding("enter", "submit", "Send", priority=True, show=False),
+        Binding("up", "suggest_up", "Suggestion up", priority=True, show=False),
+        Binding("down", "suggest_down", "Suggestion down", priority=True, show=False),
+        Binding("tab", "suggest_tab", "Complete suggestion", priority=True, show=False),
+        Binding("escape", "suggest_escape", "Close suggestions", priority=True, show=False),
         Binding("shift+enter", "newline", "New line", show=False),
         Binding("ctrl+p", "history_prev", "History previous", show=False),
         Binding("ctrl+n", "history_next", "History next", show=False),
@@ -97,13 +116,74 @@ class PromptInput(TextArea):
     ]
 
     def action_submit(self) -> None:
-        text = self.text.rstrip("\n")
+        """Enter: submit normally, or complete a suggestion when the popup is open.
+
+        Bash-style: with the popup open, Enter completes to the highlighted row
+        WITHOUT closing the popup — unless the typed text already is a full
+        command, or the completion changes nothing, in which case it submits.
+        """
+        app = self.app
+        if app._suggestions_visible:
+            current = self.text
+            if current.strip() in app._suggestion_rows:
+                self._submit_text(current)
+                return
+            completed = app._complete_suggestion_text()
+            if completed is not None:
+                if completed == current:
+                    self._submit_text(current)
+                else:
+                    self.text = completed
+                    self.move_cursor(self.document.end)
+            return
+        self._submit_text(self.text)
+
+    def _submit_text(self, text: str) -> None:
+        text = text.rstrip("\n")
         self.text = ""
         if text.strip():
             self.post_message(PromptSubmitted(text))
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+    def action_suggest_up(self) -> None:
+        app = self.app
+        if app._suggestions_visible and app._suggestion_rows:
+            n = len(app._suggestion_rows)
+            app._suggest_index = (app._suggest_index - 1) % n
+            app._render_suggestions()
+        else:
+            super().action_cursor_up()
+
+    def action_suggest_down(self) -> None:
+        app = self.app
+        if app._suggestions_visible and app._suggestion_rows:
+            n = len(app._suggestion_rows)
+            app._suggest_index = (app._suggest_index + 1) % n
+            app._render_suggestions()
+        else:
+            super().action_cursor_down()
+
+    def action_suggest_tab(self) -> None:
+        """Tab: complete to the highlighted row and close the popup."""
+        app = self.app
+        if not app._suggestions_visible:
+            # Popup closed: keep Textual's default tab behavior (focus next).
+            self.screen.focus_next()
+            return
+        completed = app._complete_suggestion_text()
+        if completed is not None and completed != self.text:
+            # Swallow the completion's own Changed so it can't re-open the popup.
+            app._suppress_reopen = True
+            self.text = completed
+            self.move_cursor(self.document.end)
+        app._close_suggestions()
+
+    def action_suggest_escape(self) -> None:
+        app = self.app
+        if app._suggestions_visible:
+            app._close_suggestions()
 
     def action_history_prev(self) -> None:
         app = self.app
@@ -279,6 +359,37 @@ class HarnessTui(App):
         max-width: 100%;
         margin: 0 0 0 0;
     }
+
+    #suggestions {
+        display: none;
+        height: auto;
+        max-height: 10;
+        border: round $accent;
+        background: $panel;
+        margin: 0 1 0 1;
+        padding: 0 1;
+        overflow: hidden auto;
+    }
+
+    .suggest-row {
+        color: $text-muted;
+    }
+
+    .suggest-row.highlight {
+        color: $accent;
+        text-style: bold;
+    }
+
+    .suggest-more {
+        color: $text-muted;
+        text-style: dim;
+    }
+
+    .thinking {
+        color: $text-muted;
+        text-style: dim;
+        margin: 0 0 1 0;
+    }
     """
 
     BINDINGS = [
@@ -334,6 +445,20 @@ class HarnessTui(App):
         self._tool_count = len(self.tools.schemas())
         self._steps = 0
 
+        # Slash-command suggestion popup state.
+        self._suggestions_visible = False
+        self._suggestion_rows: list[str] = []
+        self._suggest_index = 0
+        self._suggest_mode: str | None = None
+        self._suggest_more = False
+        self._suppress_reopen = False
+        self._suggestions: Vertical | None = None
+        # Thinking-indicator state (transient, never mirrored to transcript).
+        self._thinking_visible = False
+        self._thinking: Static | None = None
+        self._thinking_frame = 0
+        self._thinking_timer: Any = None
+
         # Auto-follow state for the conversation pane.
         self._follow = True
         # Per-turn streaming state.
@@ -367,6 +492,7 @@ class HarnessTui(App):
                         with VerticalScroll(id="sessions-view"):
                             pass
         with Vertical(id="bottom"):
+            yield Vertical(id="suggestions")
             yield PromptInput(
                 id="prompt",
                 placeholder="Ask hdp… (/help)",
@@ -378,6 +504,7 @@ class HarnessTui(App):
         self._conversation = self.query_one("#conversation", ConversationScroll)
         self._trace = self.query_one("#trace", VerticalScroll)
         self._prompt_input = self.query_one("#prompt", PromptInput)
+        self._suggestions = self.query_one("#suggestions", Vertical)
         self._write_line(
             f"hdp — {self.model_id} agent. Ask a task, or /help for commands.",
             classes="welcome",
@@ -404,6 +531,84 @@ class HarnessTui(App):
         else:
             self._start_turn(text)
 
+    # -- slash-command suggestions -------------------------------------------
+
+    @on(TextArea.Changed)
+    def _on_prompt_changed(self, event: TextArea.Changed) -> None:
+        if self._suppress_reopen:
+            # The change came from a tab-completion; keep the popup closed.
+            self._suppress_reopen = False
+            return
+        self._update_suggestions()
+
+    def _update_suggestions(self) -> None:
+        """Recompute the popup rows from the current prompt text.
+
+        Typed text starting with ``/`` (no newline) filters the command list by
+        prefix; once the text is ``/resume <arg>`` it filters session ids
+        (newest first) by the arg prefix instead.
+        """
+        if self._prompt_input is None:
+            return
+        text = self._prompt_input.text
+        rows: list[str] = []
+        mode: str | None = None
+        self._suggest_more = False
+        if text.startswith("/") and "\n" not in text:
+            if text.startswith("/resume "):
+                mode = "session"
+                arg = text[len("/resume "):]
+                entries = sorted(
+                    sessions.list_sessions(), key=lambda e: e["id"], reverse=True
+                )
+                rows = [e["id"] for e in entries if e["id"].startswith(arg)]
+            else:
+                mode = "command"
+                lowered = text.lower()
+                rows = [c for c in COMMANDS if c.lower().startswith(lowered)]
+        if len(rows) > 8:
+            self._suggest_more = True
+            rows = rows[:8]
+        self._suggest_mode = mode
+        self._suggestion_rows = rows
+        self._suggest_index = 0
+        self._render_suggestions()
+
+    def _render_suggestions(self) -> None:
+        """(Re)draw the popup rows with the current highlight; hide when empty."""
+        visible = bool(self._suggestion_rows)
+        self._suggestions_visible = visible
+        if self._suggestions is None:
+            return
+        self._suggestions.display = visible
+        if not visible:
+            return
+        if self._suggest_index >= len(self._suggestion_rows):
+            self._suggest_index = 0
+        self._suggestions.remove_children()
+        for i, row in enumerate(self._suggestion_rows):
+            cls = "suggest-row highlight" if i == self._suggest_index else "suggest-row"
+            self._suggestions.mount(Static(row, classes=cls, markup=False))
+        if self._suggest_more:
+            self._suggestions.mount(Static("…", classes="suggest-more", markup=False))
+
+    def _close_suggestions(self) -> None:
+        self._suggestions_visible = False
+        self._suggestion_rows = []
+        if self._suggestions is not None:
+            self._suggestions.display = False
+
+    def _complete_suggestion_text(self) -> str | None:
+        """The full prompt text produced by completing the highlighted row."""
+        rows = self._suggestion_rows
+        if not rows:
+            return None
+        idx = self._suggest_index % len(rows)
+        row = rows[idx]
+        if self._suggest_mode == "session":
+            return "/resume " + row
+        return row
+
     def _start_turn(self, task: str) -> None:
         """Render the user block, build a fresh one-shot loop, run it."""
         self._render_user_block(task)
@@ -421,6 +626,7 @@ class HarnessTui(App):
         self._cancel_turn = False
         self.turn_active = True
         self._reset_turn_stream()
+        self._show_thinking()
         self._prompt_input.disabled = True
         self._render_status()
         self.run_worker(self._thread_run, thread=True, group="agent")
@@ -460,11 +666,13 @@ class HarnessTui(App):
                 # interleave between generations instead of stacking after.
                 self._flush_md()
                 self._reset_turn_stream()
+            self._show_thinking()
             self._render_status()
         elif kind == "content":
             self._ensure_assistant()
             self._append_content(event[1])  # type: ignore[arg-type]
         elif kind == "reasoning":
+            self._show_thinking()
             if self.verbose:
                 self._append_reasoning(event[1])  # type: ignore[arg-type]
         elif kind == "tool_start":
@@ -503,6 +711,7 @@ class HarnessTui(App):
         """Mount the '▌ hdp' label + the turn's streaming Markdown widget."""
         if self._turn_md is not None:
             return
+        self._hide_thinking()  # first content: thinking phase is over
         self.transcript.append("▌ hdp")
         self._conversation.mount(Static("▌ hdp", classes="assistant-label", markup=False))
         self._turn_md = Markdown("", classes="assistant-md")
@@ -551,6 +760,43 @@ class HarnessTui(App):
             self._conversation.mount(self._reasoning)
         self._reasoning.update(f"💭 {self._reasoning_text}")
         self._scroll_follow()
+
+    # -- thinking indicator ---------------------------------------------------
+
+    def _show_thinking(self) -> None:
+        """Mount the animated '💭 thinking' spinner (idempotent).
+
+        Shown whenever the model is generating but no content has arrived yet;
+        hidden again at the first content of a generation or at turn end. The
+        spinner is transient — it is never mirrored to the transcript.
+        """
+        if self._thinking_visible:
+            return
+        self._thinking_visible = True
+        self._thinking_frame = 0
+        self._thinking = Static("", classes="thinking", markup=False)
+        self._conversation.mount(self._thinking)
+        self._thinking_timer = self.set_interval(0.08, self._tick_thinking)
+        self._tick_thinking()
+        self._scroll_follow()
+
+    def _tick_thinking(self) -> None:
+        if not self._thinking_visible or self._thinking is None:
+            return
+        frame = THINK_FRAMES[self._thinking_frame % len(THINK_FRAMES)]
+        self._thinking_frame += 1
+        self._thinking.update(f"💭 thinking {frame}")
+
+    def _hide_thinking(self) -> None:
+        if not self._thinking_visible:
+            return
+        self._thinking_visible = False
+        if self._thinking_timer is not None:
+            self._thinking_timer.stop()
+            self._thinking_timer = None
+        if self._thinking is not None:
+            self._thinking.remove()
+            self._thinking = None
 
     def _on_tool_start(self, call: ToolCall) -> None:
         self.transcript.append(f"⚙ {call.name}({call.arguments})")
@@ -658,6 +904,7 @@ class HarnessTui(App):
     # -- turn lifecycle -----------------------------------------------------
 
     def turn_finished(self) -> None:
+        self._hide_thinking()
         self._flush_md()
         self.turn_active = False
         self.resume_next = True
@@ -740,7 +987,7 @@ class HarnessTui(App):
         )
         self._write_line(
             "keys: enter send · shift+enter newline · ctrl+p/n history · "
-            "ctrl+l bottom · ctrl+c cancel · ctrl+q quit"
+            "tab complete · ctrl+l bottom · ctrl+c cancel · ctrl+q quit"
         )
 
 

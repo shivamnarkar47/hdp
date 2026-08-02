@@ -11,11 +11,13 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from textual.widgets import TextArea
 
+from harness import sessions
 from harness.tui import HarnessTui
 
 FW = "\uff5c"  # fullwidth vertical bar: DSML envelope delimiter
@@ -51,6 +53,17 @@ class FakeGateway:
 
     def stream(self, messages, tools):
         yield from self.scripts.pop(0)
+
+
+THINK_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _thinking_script():
+    """Reasoning, then a pause, then the final answer (worker-thread sleep)."""
+    yield ("reasoning", "thinking hard")
+    time.sleep(0.4)
+    yield ("content", "answer")
+    yield ("done", "stop")
 
 
 class TestTui(unittest.TestCase):
@@ -115,6 +128,81 @@ class TestTui(unittest.TestCase):
                     await pilot.pause(0.05)
                 self.assertIn(sid, "".join(app.transcript))
                 self.assertIn("write hello.txt", "".join(app.transcript))
+
+        asyncio.run(flow())
+
+    def test_slash_suggestions(self):
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                # A bare "/" lists every command.
+                prompt.text = "/"
+                await pilot.pause()
+                self.assertTrue(app._suggestions_visible)
+                self.assertEqual(len(app._suggestion_rows), 8)
+                for cmd in (
+                    "/help",
+                    "/new",
+                    "/resume",
+                    "/sessions",
+                    "/memory",
+                    "/model",
+                    "/verbose",
+                    "/quit",
+                ):
+                    self.assertIn(cmd, app._suggestion_rows)
+                # Prefix filter narrows the list.
+                prompt.text = "/res"
+                await pilot.pause()
+                self.assertEqual(app._suggestion_rows, ["/resume"])
+                # Tab completes and closes the popup.
+                await pilot.press("tab")
+                await pilot.pause()
+                self.assertEqual(app.query_one("#prompt", TextArea).text, "/resume")
+                self.assertFalse(app._suggestions_visible)
+                # Escape keeps the popup closed.
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertFalse(app._suggestions_visible)
+                # "/resume <arg>" suggests session ids, newest first.
+                sessions.append_event("20260802-120000", {"type": "user", "data": {"content": "x"}})
+                sessions.append_event("20260802-130000", {"type": "user", "data": {"content": "y"}})
+                prompt.text = "/resume 20260802-1"
+                await pilot.pause()
+                self.assertEqual(
+                    app._suggestion_rows, ["20260802-130000", "20260802-120000"]
+                )
+
+        asyncio.run(flow())
+
+    def test_thinking_indicator(self):
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway(_thinking_script()),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "think"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                # The worker is mid-reasoning (sleeping); the spinner must be up.
+                await pilot.pause(0.15)
+                self.assertTrue(app._thinking_visible)
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                self.assertFalse(app._thinking_visible)
+                transcript = "".join(app.transcript)
+                self.assertIn("answer", transcript)
+                # Transient spinner never leaks into the transcript mirror.
+                for frame in THINK_FRAMES:
+                    self.assertNotIn(frame, transcript)
+                self.assertNotIn("thinking hard", transcript)  # verbose off
 
         asyncio.run(flow())
 
