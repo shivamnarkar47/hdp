@@ -1,7 +1,7 @@
 """CLI tests: --version, sessions show/delete/prune, run -, doctor.
 
 All network is stubbed (FakeGateway for run, patched urlopen for doctor);
-the session store is isolated via HARNESSDP_SESSIONS_DIR.
+the session store is isolated via KALA_SESSIONS_DIR.
 """
 
 from __future__ import annotations
@@ -37,16 +37,16 @@ class TestCli(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tempdir = Path(self._tmp.name)
-        self._old_sessions_dir = os.environ.get("HARNESSDP_SESSIONS_DIR")
-        os.environ["HARNESSDP_SESSIONS_DIR"] = str(self.tempdir / "sessions")
+        self._old_sessions_dir = os.environ.get("KALA_SESSIONS_DIR")
+        os.environ["KALA_SESSIONS_DIR"] = str(self.tempdir / "sessions")
         self._old_key = os.environ.get("OPENCODE_API_KEY")
         os.environ["OPENCODE_API_KEY"] = "test-key"
 
     def tearDown(self):
         if self._old_sessions_dir is None:
-            os.environ.pop("HARNESSDP_SESSIONS_DIR", None)
+            os.environ.pop("KALA_SESSIONS_DIR", None)
         else:
-            os.environ["HARNESSDP_SESSIONS_DIR"] = self._old_sessions_dir
+            os.environ["KALA_SESSIONS_DIR"] = self._old_sessions_dir
         if self._old_key is None:
             os.environ.pop("OPENCODE_API_KEY", None)
         else:
@@ -68,7 +68,7 @@ class TestCli(unittest.TestCase):
     def test_version(self):
         code, out, _ = self._run_cli(["--version"])
         self.assertEqual(code, 0)
-        self.assertIn("hdp 0.1.0", out)
+        self.assertIn("kala 0.1.0", out)
 
     # -- sessions show ------------------------------------------------------
 
@@ -255,7 +255,7 @@ class TestCli(unittest.TestCase):
                 ["run", "hi", "--agent", "Bogus", "--dir", str(self.tempdir)]
             )
         self.assertEqual(code, 1)
-        self.assertIn("hdp: no such agent: Bogus", err)
+        self.assertIn("kala: no such agent: Bogus", err)
         # The error short-circuits before any gateway stream.
         self.assertEqual(gateway.calls, [])
 

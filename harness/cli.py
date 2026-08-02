@@ -1,10 +1,10 @@
-"""Command-line entry point: the hdp script.
+"""Command-line entry point: the kala script.
 
-`hdp` with no subcommand launches the Textual TUI (textual is imported
+`kala` with no subcommand launches the Textual TUI (textual is imported
 lazily so every other command works even when it is not installed).
-`hdp run` is a one-shot, non-interactive agent run; `hdp sessions list`
-shows the persisted session store; `hdp sessions show|delete|prune` manage
-individual sessions; `hdp doctor` self-checks the environment without
+`kala run` is a one-shot, non-interactive agent run; `kala sessions list`
+shows the persisted session store; `kala sessions show|delete|prune` manage
+individual sessions; `kala doctor` self-checks the environment without
 spending tokens.
 """
 
@@ -32,10 +32,10 @@ _DOCTOR_UA = "python-requests/2.31.0"
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hdp",
-        description="hdp — DeepSeek V4 Flash agent harness",
+        prog="kala",
+        description="kala — DeepSeek V4 Flash agent harness",
     )
-    parser.add_argument("--version", action="version", version=f"hdp {__version__}")
+    parser.add_argument("--version", action="version", version=f"kala {__version__}")
     sub = parser.add_subparsers(dest="subcommand")
 
     run_p = sub.add_parser("run", help="run a one-shot prompt")
@@ -70,17 +70,17 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--no-tool-cache",
         action="store_true",
-        help="disable the read-only tool-result cache (.hdp/tool-cache.json)",
+        help="disable the read-only tool-result cache (.kala/tool-cache.json)",
     )
     run_p.add_argument("--no-verify",
         action="store_true",
-        help="disable verify hooks after mutation (.hdp/hooks.json)",
+        help="disable verify hooks after mutation (.kala/hooks.json)",
     )
     run_p.add_argument(
         "--agent",
         default=None,
         metavar="NAME",
-        help="persona to operate as (name from .hdp/agents.json; the five Pandava defaults always exist)",
+        help="persona to operate as (name from .kala/agents.json; the five Pandava defaults always exist)",
     )
 
     sessions_p = sub.add_parser("sessions", help="session store commands")
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.subcommand is None:
-        # Lazy import: `hdp run` must work even without textual installed.
+        # Lazy import: `kala run` must work even without textual installed.
         from harness.tui import main as tui_main
 
         tui_main()
@@ -135,7 +135,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         if record.get("error_kind") == "config":
             # config.get_api_key already printed its message; nothing to add.
             return 1
-        print(f"hdp: {record['error']}", file=sys.stderr)
+        print(f"kala: {record['error']}", file=sys.stderr)
         if args.json:
             print(json.dumps({"session_id": record["session_id"], "error": record["error"]}))
         return 2 if record.get("error_kind") == "loop" else 1
@@ -179,7 +179,7 @@ def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
     if not args.no_tool_cache:
         from harness.toolcache import ToolCache
 
-        cache = ToolCache(project_dir / ".hdp" / "tool-cache.json")
+        cache = ToolCache(project_dir / ".kala" / "tool-cache.json")
     tools = ToolRegistry(
         memory=memory,
         project_dir=project_dir,
@@ -292,10 +292,10 @@ def _run_batch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     try:
         prompts = _read_batch_prompts(args.batch)
     except OSError as exc:
-        print(f"hdp: cannot read batch file: {exc}", file=sys.stderr)
+        print(f"kala: cannot read batch file: {exc}", file=sys.stderr)
         return 1
     if not prompts:
-        print("hdp: batch file contains no prompts", file=sys.stderr)
+        print("kala: batch file contains no prompts", file=sys.stderr)
         return 1
     session_ids = [sessions.new_session_id() for _ in prompts]
     records: list[dict | None] = [None] * len(prompts)
@@ -318,7 +318,7 @@ def _run_batch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
             f"{count} {kind}" for kind, count in counts.items() if count
         )
         print(
-            f"hdp: batch: {failed} of {len(prompts)} task(s) failed ({detail})",
+            f"kala: batch: {failed} of {len(prompts)} task(s) failed ({detail})",
             file=sys.stderr,
         )
     if args.json:
@@ -342,13 +342,13 @@ def _sessions(args: argparse.Namespace) -> int:
         return _sessions_delete(args.id)
     if sub == "prune":
         return _sessions_prune(args.keep)
-    print("hdp: unknown sessions subcommand", file=sys.stderr)
+    print("kala: unknown sessions subcommand", file=sys.stderr)
     return 2
 
 
 def _sessions_show(session_id: str) -> int:
     if not (sessions.get_store_dir() / f"{session_id}.jsonl").is_file():
-        print(f"hdp: no such session: {session_id}", file=sys.stderr)
+        print(f"kala: no such session: {session_id}", file=sys.stderr)
         return 1
     for record in sessions.read_events(session_id):
         data = json.dumps(record.get("data", {}), ensure_ascii=False, separators=(",", ":"))
@@ -395,7 +395,7 @@ def _doctor(args: argparse.Namespace) -> int:
     gateway_ok = _gateway_reachable()
     print(f"gateway: {'reachable' if gateway_ok else 'unreachable'}")
 
-    structure_path = Path.cwd() / ".hdp" / "STRUCTURE.md"
+    structure_path = Path.cwd() / ".kala" / "STRUCTURE.md"
     if structure_path.is_file():
         print(f"structure cache: exists · {_structure_entry_count(structure_path)} entries")
     else:

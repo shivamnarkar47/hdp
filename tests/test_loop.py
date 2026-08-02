@@ -96,7 +96,7 @@ class CountingToolRegistry(ToolRegistry):
     """
 
     def __init__(self, project_dir):
-        self._cache_path = Path(project_dir) / ".hdp" / "tool-cache.json"
+        self._cache_path = Path(project_dir) / ".kala" / "tool-cache.json"
         self.read_calls = 0
         super().__init__(project_dir=project_dir, cache=ToolCache(self._cache_path))
 
@@ -111,15 +111,15 @@ class TestAgentLoop(unittest.TestCase):
         self.tempdir = Path(self._tmp.name)
         self.memory = Memory(self.tempdir / ".agent-memory")
         self.tools = ToolRegistry(memory=self.memory, project_dir=self.tempdir)
-        self._old_sessions_dir = os.environ.get("HARNESSDP_SESSIONS_DIR")
-        os.environ["HARNESSDP_SESSIONS_DIR"] = str(self.tempdir / "sessions")
+        self._old_sessions_dir = os.environ.get("KALA_SESSIONS_DIR")
+        os.environ["KALA_SESSIONS_DIR"] = str(self.tempdir / "sessions")
         self.session_id = "test-loop"
 
     def tearDown(self):
         if self._old_sessions_dir is None:
-            os.environ.pop("HARNESSDP_SESSIONS_DIR", None)
+            os.environ.pop("KALA_SESSIONS_DIR", None)
         else:
-            os.environ["HARNESSDP_SESSIONS_DIR"] = self._old_sessions_dir
+            os.environ["KALA_SESSIONS_DIR"] = self._old_sessions_dir
         self._tmp.cleanup()
 
     # -- tests ---------------------------------------------------------------
@@ -283,7 +283,7 @@ class TestAgentLoop(unittest.TestCase):
         loop.run("Write the file")
         # The loop created the structure cache and refreshed it after the
         # write tool, so the new file appears in the doc.
-        doc = (self.tempdir / ".hdp" / "STRUCTURE.md").read_text(encoding="utf-8")
+        doc = (self.tempdir / ".kala" / "STRUCTURE.md").read_text(encoding="utf-8")
         self.assertIn("hello.txt", doc)
         self.assertIn("<!-- sig: ", doc)
 
@@ -611,12 +611,12 @@ class TestAgentLoop(unittest.TestCase):
         stub.execute("read", {"path": "a.txt"})
         self.assertEqual(stub.read_calls, 2)  # never cached
         # The cache file was never even created.
-        self.assertFalse((self.tempdir / ".hdp" / "tool-cache.json").exists())
+        self.assertFalse((self.tempdir / ".kala" / "tool-cache.json").exists())
 
     # -- verify hooks --------------------------------------------------------
 
     def _write_hooks(self, verify_cmd):
-        hooks = self.tempdir / ".hdp" / "hooks.json"
+        hooks = self.tempdir / ".kala" / "hooks.json"
         hooks.parent.mkdir(parents=True, exist_ok=True)
         hooks.write_text(json.dumps({"verify": verify_cmd}), encoding="utf-8")
 
@@ -667,7 +667,7 @@ class TestAgentLoop(unittest.TestCase):
         self.assertNotIn("verify", [e[0] for e in events])
 
     def test_invalid_hooks_json_disables_verify(self):
-        hooks = self.tempdir / ".hdp" / "hooks.json"
+        hooks = self.tempdir / ".kala" / "hooks.json"
         hooks.parent.mkdir(parents=True, exist_ok=True)
         hooks.write_text("{not json", encoding="utf-8")
         gateway = FakeGateway(*self._write_turn_scripts())

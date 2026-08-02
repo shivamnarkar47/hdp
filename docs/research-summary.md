@@ -1,4 +1,4 @@
-# Research Summary — Harness Engineering Findings for HarnessDP
+# Research Summary — Harness Engineering Findings for kala
 
 A digest of harness-engineering research (context engineering, agent memory, operational boundaries) as applied to this repo. Companion to the root `AGENTS.md`.
 

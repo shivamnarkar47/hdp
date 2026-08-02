@@ -30,14 +30,14 @@ class TestMemory(unittest.TestCase):
         self.root = Path(self._root_tmp.name)
         self._sessions_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._sessions_tmp.cleanup)
-        self._old_sessions_dir = os.environ.get("HARNESSDP_SESSIONS_DIR")
-        os.environ["HARNESSDP_SESSIONS_DIR"] = self._sessions_tmp.name
+        self._old_sessions_dir = os.environ.get("KALA_SESSIONS_DIR")
+        os.environ["KALA_SESSIONS_DIR"] = self._sessions_tmp.name
 
     def tearDown(self) -> None:
         if self._old_sessions_dir is None:
-            os.environ.pop("HARNESSDP_SESSIONS_DIR", None)
+            os.environ.pop("KALA_SESSIONS_DIR", None)
         else:
-            os.environ["HARNESSDP_SESSIONS_DIR"] = self._old_sessions_dir
+            os.environ["KALA_SESSIONS_DIR"] = self._old_sessions_dir
 
     def _memory(self) -> Memory:
         return Memory(self.root)
@@ -182,7 +182,7 @@ class TestMemory(unittest.TestCase):
             append_event(new_session_id(), {"type": "bogus", "data": {}})
 
     def test_store_dir_override(self):
-        self.assertEqual(get_store_dir(), Path(os.environ["HARNESSDP_SESSIONS_DIR"]))
+        self.assertEqual(get_store_dir(), Path(os.environ["KALA_SESSIONS_DIR"]))
         self.assertEqual(list_sessions(), [])
 
 
@@ -215,8 +215,8 @@ class TestPrompts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp) / "proj3"
             cwd.mkdir()
-            (cwd / ".hdp").mkdir()
-            (cwd / ".hdp" / "STRUCTURE.md").write_text(
+            (cwd / ".kala").mkdir()
+            (cwd / ".kala" / "STRUCTURE.md").write_text(
                 "# Project Structure\nRoot: x\n## Tree\n└── README.md (5 B)\n",
                 encoding="utf-8",
             )
@@ -262,7 +262,7 @@ class TestPrompts(unittest.TestCase):
         )
         project = "Date: 2026-08-02\nCWD: /tmp/x"
         prompt = build_system_prompt(digest, project)
-        self.assertIn("hdp — DeepSeek V4 Flash harness agent", prompt)
+        self.assertIn("kala — DeepSeek V4 Flash harness agent", prompt)
         self.assertIn(
             "When you need a fact or a file operation, call a tool. You may batch "
             "independent tool calls. The harness parses your DSML tool calls "

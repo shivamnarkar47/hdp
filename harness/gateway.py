@@ -35,7 +35,7 @@ class GatewayError(Exception):
 # -- transport ---------------------------------------------------------------
 # Keep-alive: reuse one HTTP(S) connection per thread across turns so every
 # chat turn doesn't pay a fresh TCP+TLS handshake. Enabled by default; off when
-# HARNESSDP_NO_KEEPALIVE=1 or any proxy env var is set (proxies need per-
+# KALA_NO_KEEPALIVE=1 or any proxy env var is set (proxies need per-
 # request connection state we don't manage). The module-level ``_urlopen`` is
 # the seam Gateway.stream() calls; tests patch it directly.
 
@@ -168,8 +168,8 @@ def _keepalive_urlopen(request, timeout=None):
 
 
 def _keepalive_enabled() -> bool:
-    """Keep-alive is on by default; off with HARNESSDP_NO_KEEPALIVE=1 or proxies."""
-    if os.environ.get("HARNESSDP_NO_KEEPALIVE") == "1":
+    """Keep-alive is on by default; off with KALA_NO_KEEPALIVE=1 or proxies."""
+    if os.environ.get("KALA_NO_KEEPALIVE") == "1":
         return False
     return not any(os.environ.get(var) for var in _PROXY_ENV_VARS)
 

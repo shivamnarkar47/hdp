@@ -1,7 +1,7 @@
-# Terminal setup — the intended hdp look
+# Terminal setup — the intended kala look
 
-hdp is a terminal UI: Textual renders *characters*, and the terminal emulator
-draws them. The font is therefore a terminal-side setting — hdp cannot change
+kala is a terminal UI: Textual renders *characters*, and the terminal emulator
+draws them. The font is therefore a terminal-side setting — kala cannot change
 it. To get the intended look (the KESHAVLOK banner, box-drawing panels, and
 the tmux-style status bar), configure your emulator's font to
 **Fira Sans Condensed** (or a mono fallback if alignment breaks).
@@ -50,6 +50,6 @@ kitty, switch to a mono face if the TUI's box drawing misaligns.)
 
 ## Checking alignment
 
-After changing the font, restart hdp and look at the KESHAVLOK banner and the
+After changing the font, restart kala and look at the KESHAVLOK banner and the
 status bar: `│` separators should line up in one vertical column across the
 bar. If they don't, use the mono variant above.

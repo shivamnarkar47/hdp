@@ -61,7 +61,7 @@ class TestMessages(unittest.TestCase):
 class TestWireTokenCost(unittest.TestCase):
     def _sample_wire(self):
         messages = [
-            SystemMessage("you are hdp — the harness agent"),
+            SystemMessage("you are kala — the harness agent"),
             UserMessage("read the file, then summarize it carefully"),
             AssistantMessage(
                 content="Let me look.",

@@ -1,6 +1,6 @@
-"""Project-structure awareness: a regenerable `.hdp/STRUCTURE.md` cache.
+"""Project-structure awareness: a regenerable `.kala/STRUCTURE.md` cache.
 
-Scans the project tree once, writes a markdown tree into `.hdp/STRUCTURE.md`
+Scans the project tree once, writes a markdown tree into `.kala/STRUCTURE.md`
 (git-ignored), and refreshes it only when the tree changes (a cheap signature
 scan over relpath/size/mtime). Reopen reads the cache directly for instant
 context. This is regenerable cache — NOT durable memory (that stays in
@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Iterator
 
 # Directories skipped at any depth (also keeps the cache from invalidating
-# itself: `.hdp` holds STRUCTURE.md, whose own mtime must never enter the sig).
+# itself: `.kala` holds STRUCTURE.md, whose own mtime must never enter the sig).
 NOISE_DIRS = {
     ".git",
     "__pycache__",
     ".venv",
     "node_modules",
-    ".hdp",
+    ".kala",
     "dist",
     "build",
     ".omp",
@@ -50,7 +50,7 @@ def _human_size(n: int) -> str:
 
 
 class StructureManager:
-    """Scan + cache a project's tree under ``.hdp/STRUCTURE.md``."""
+    """Scan + cache a project's tree under ``.kala/STRUCTURE.md``."""
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root).resolve()
@@ -63,7 +63,7 @@ class StructureManager:
 
     @property
     def cache_path(self) -> Path:
-        return self.root / ".hdp" / "STRUCTURE.md"
+        return self.root / ".kala" / "STRUCTURE.md"
 
     def ensure(self) -> str:
         """Return the cached doc; scan + write on first use (no rescan)."""

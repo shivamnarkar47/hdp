@@ -1,4 +1,4 @@
-"""Textual split-pane TUI — the default hdp surface.
+"""Textual split-pane TUI — the default kala surface.
 
 A polished agent client over :class:`harness.loop.AgentLoop`: a conversation
 pane (user blocks, streamed-markdown assistant turns, reasoning, collapsed
@@ -602,9 +602,9 @@ class AgentIntentScreen(ModalScreen[str | None]):
 
 
 class HarnessTui(App):
-    """Split-pane chat TUI for hdp."""
+    """Split-pane chat TUI for kala."""
 
-    TITLE = "hdp"
+    TITLE = "kala"
 
     CSS = """
     Screen {
@@ -862,7 +862,7 @@ class HarnessTui(App):
         self.model_id: str = getattr(gateway, "model_id", None) or model_id or config.MODEL_ID
         self.project_dir = Path(project_dir or Path.cwd())
         # Agent personas (harness.agents): seeded with the five Pandavas when
-        # .hdp/agents.json is missing; `active` picks the persona injected
+        # .kala/agents.json is missing; `active` picks the persona injected
         # into every fresh AgentLoop (None = no persona). The persona is on by
         # default: when nothing is active, activate the first agent
         # (Yudhishthira) and persist, so the status bar always leads with a
@@ -974,7 +974,7 @@ class HarnessTui(App):
             yield Vertical(id="suggestions")
             yield PromptInput(
                 id="prompt",
-                placeholder="Ask hdp… (/help)",
+                placeholder="Ask kala… (/help)",
                 soft_wrap=True,
             )
             yield Static(id="status")
@@ -1206,12 +1206,12 @@ class HarnessTui(App):
         self._tool_boxes = {}
 
     def _ensure_assistant(self) -> None:
-        """Mount the '▌ hdp' label + the turn's streaming Markdown widget."""
+        """Mount the '▌ kala' label + the turn's streaming Markdown widget."""
         if self._turn_md is not None:
             return
         self._hide_thinking()  # first content: thinking phase is over
-        self.transcript.append("▌ hdp")
-        self._conversation.mount(Static("▌ hdp", classes="assistant-label", markup=False))
+        self.transcript.append("▌ kala")
+        self._conversation.mount(Static("▌ kala", classes="assistant-label", markup=False))
         self._turn_md = Markdown("", classes="assistant-md")
         self._conversation.mount(self._turn_md)
         self._scroll_follow()
@@ -1360,7 +1360,7 @@ class HarnessTui(App):
         self._conversation.mount(
             Static(BANNER_TAGLINE, classes="banner-tagline", markup=False)
         )
-        welcome = f"hdp — {self.model_id} agent. Ask a task, or /help for commands."
+        welcome = f"kala — {self.model_id} agent. Ask a task, or /help for commands."
         self.transcript.append(welcome)
         self._conversation.mount(Static(welcome, classes="welcome", markup=False))
         # Banner first: start at the top so the title is in view.
@@ -1506,10 +1506,10 @@ class HarnessTui(App):
             self._conversation.mount(
                 Static(f"💭 {reasoning}", classes="reasoning", markup=False)
             )
-        self.transcript.append("▌ hdp")
+        self.transcript.append("▌ kala")
         content = wire.get("content", "")
         self.transcript.append(content)
-        self._conversation.mount(Static("▌ hdp", classes="assistant-label", markup=False))
+        self._conversation.mount(Static("▌ kala", classes="assistant-label", markup=False))
         self._conversation.mount(Markdown(content, classes="assistant-md"))
         for call in wire.get("tool_calls") or []:
             name, args = _call_name_args(call)
@@ -1546,7 +1546,7 @@ class HarnessTui(App):
 
         ("activate", name) / ("delete", name) / "new" / None (cancelled).
         Agent activations are session state, not session events — nothing is
-        written to the session JSONL; .hdp/agents.json covers persistence.
+        # written to the session JSONL; .kala/agents.json covers persistence.
         """
         if result is None:
             return
@@ -1743,9 +1743,9 @@ class HarnessTui(App):
             model = "-".join(model.split("-")[-2:])
         agent_name = self._active_agent["name"] if self._active_agent else "—"
         clock = datetime.now().strftime("%a %d %b %H:%M")
-        left = f" hdp · {model} · {self._session_short()} "
+        left = f" kala · {model} · {self._session_short()} "
         if short_model:
-            left = f" hdp · {model} "
+            left = f" kala · {model} "
             # Agent names are short by design (<= the 12-char Yudhishthira);
             # the >90-char fallback also drops the clock's weekday.
             if len(agent_name) > 12:
@@ -1937,13 +1937,13 @@ class HarnessTui(App):
 
 
 def main() -> None:
-    """Launch the TUI (the default `hdp` surface)."""
+    """Launch the TUI (the default `kala` surface)."""
     app = HarnessTui()
     app.run()
     # Textual has restored the terminal by now; print the resume hint using
     # the app's last session id (so /new or /resume mid-session is reflected).
     print(
-        f"Session {app.session_id} — resume with: hdp run --resume {app.session_id}  "
+        f"Session {app.session_id} — resume with: kala run --resume {app.session_id}  "
         f"(or /resume {app.session_id} in the TUI)"
     )
 

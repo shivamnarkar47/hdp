@@ -12,11 +12,11 @@ VALID_TYPES = {"user", "assistant", "tool_call", "tool_result", "error", "meta"}
 
 
 def get_store_dir() -> Path:
-    """Session store directory: $HARNESSDP_SESSIONS_DIR or the default XDG-ish path."""
-    override = os.environ.get("HARNESSDP_SESSIONS_DIR")
+    """Session store directory: $KALA_SESSIONS_DIR or the default XDG-ish path."""
+    override = os.environ.get("KALA_SESSIONS_DIR")
     if override:
         return Path(override)
-    return Path.home() / ".local" / "share" / "harnessdp" / "sessions"
+    return Path.home() / ".local" / "share" / "kala" / "sessions"
 
 
 def new_session_id() -> str:

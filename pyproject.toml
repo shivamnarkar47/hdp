@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "harnessdp"
+name = "kala"
 version = "0.1.0"
-description = "hdp — a DeepSeek V4 Flash agent harness with a Textual TUI"
+description = "kala — a DeepSeek V4 Flash agent harness with a Textual TUI"
 requires-python = ">=3.12"
 dependencies = ["textual"]
 
 [project.scripts]
-hdp = "harness.cli:main"
+kala = "harness.cli:main"
 
 [tool.setuptools]
 packages = ["harness", "tests"]

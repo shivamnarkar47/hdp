@@ -1,6 +1,6 @@
-# HarnessDP — Architecture Diagrams
+# kala — Architecture Diagrams
 
-Mermaid diagrams for the `hdp` agent harness. Render them with any Mermaid
+Mermaid diagrams for the `kala` agent harness. Render them with any Mermaid
 viewer (GitHub, `mmdc`, VS Code extension).
 
 ## 1. Module architecture & data flow
@@ -8,7 +8,7 @@ viewer (GitHub, `mmdc`, VS Code extension).
 ```mermaid
 flowchart TD
     subgraph ENTRY["Entry points"]
-        CLI["harness/cli.py — argparse; hdp run / hdp sessions / lazy TUI launch"]
+        CLI["harness/cli.py — argparse; kala run / kala sessions / lazy TUI launch"]
         TUI["harness/tui.py — Textual split-pane UI (the ONLY textual import)"]
     end
 
@@ -89,7 +89,7 @@ sequenceDiagram
     participant TOOLS as harness/tools.py (ToolRegistry)
     participant SESS as harness/sessions.py (JSONL)
 
-    U->>CLI: hdp run "PROMPT" [--dir, --model, --max-steps, --resume]
+    U->>CLI: kala run "PROMPT" [--dir, --model, --max-steps, --resume]
     CLI->>CLI: resolve API key (env OPENCODE_API_KEY → ~/.omp/agent/agent.db)
     CLI->>LOOP: AgentLoop(Gateway, Memory, ToolRegistry).run(prompt, emit)
 

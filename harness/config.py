@@ -63,16 +63,16 @@ def estimate_cost(
 
 
 def user_key_path() -> Path:
-    """Path of the user API-key store (`$XDG_CONFIG_HOME/harnessdp/api_key`).
+    """Path of the user API-key store (`$XDG_CONFIG_HOME/kala/api_key`).
 
-    Windows uses `%APPDATA%\harnessdp\api_key`; POSIX falls back to
+    Windows uses `%APPDATA%\kala\api_key`; POSIX falls back to
     `~/.config` when `XDG_CONFIG_HOME` is unset.
     """
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "harnessdp" / "api_key"
+    return base / "kala" / "api_key"
 
 
 def save_user_api_key(key: str) -> None:
@@ -126,7 +126,7 @@ def get_api_key() -> str:
         pass  # fall through to the hard error below
 
     print(
-        "hdp: no API key found. Set OPENCODE_API_KEY, run `hdp` and use "
+        "kala: no API key found. Set OPENCODE_API_KEY, run `kala` and use "
         "/connect, or re-add the opencode-go credential (`opencode` / "
         "`omp /connect`). Checked: env OPENCODE_API_KEY, "
         f"{user_key_path()}, and ~/.omp/agent/agent.db.",

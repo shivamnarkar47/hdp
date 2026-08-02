@@ -1,11 +1,11 @@
-"""Agent personas: definitions + persistence (`.hdp/agents.json`).
+"""Agent personas: definitions + persistence (`.kala/agents.json`).
 
 The harness ships with five default personas — the Pandavas of the
 Mahabharata — each a distinctive way of approaching a task. Users can
 activate one for a session (the persona is injected into the system prompt),
 create new ones in the TUI (`/agents`), and have the model invent one via
-Ctrl+A. State lives in ``<project_dir>/.hdp/agents.json`` (git-ignored via
-``.hdp/``) as ``{"agents": [ {name, description}, ... ], "active": name|None}``.
+Ctrl+A. State lives in ``<project_dir>/.kala/agents.json`` (git-ignored via
+``.kala/``) as ``{"agents": [ {name, description}, ... ], "active": name|None}``.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ DEFAULT_AGENTS: list[dict] = [
 
 
 def _path(root: Path) -> Path:
-    return Path(root) / ".hdp" / "agents.json"
+    return Path(root) / ".kala" / "agents.json"
 
 
 def _seeded() -> dict:
