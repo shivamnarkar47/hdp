@@ -8,6 +8,14 @@
 
 kala is a DeepSeek V4 Flash agent harness: a Textual TUI plus a `kala run` CLI that drives gateway-backed agent sessions. The core is stdlib-only — `textual` is the only runtime dependency.
 
+## Why "kala"?
+
+kala (काल) means **Time** in Sanskrit. In the Bhagavad Gita (11.32), Krishna reveals himself to Arjuna as Kāla: *"kālo 'smi"* — *"I am Time, the destroyer of worlds."*
+
+The name fits: kala is the orchestrator — it works the clock for you, running agents that think, read, and act while you don't. Time is the one resource it manages relentlessly.
+
+The theme runs through the product: the harness (the mastermind, "KESHAVLOK") commands five default agent personas named after the Pandavas — Yudhishthira, Bhima, Arjuna, Nakula, Sahadeva.
+
 ## Requirements
 
 - Python >= 3.12
