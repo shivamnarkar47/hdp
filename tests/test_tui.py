@@ -142,13 +142,62 @@ class TestTui(unittest.TestCase):
                 first_row = str(list_view.children[0].query_one(Label).render())
                 self.assertIn("20260802-130000", first_row)
                 self.assertIn("second", first_row)
-                # Enter resumes the highlighted (newest) session.
+                # Enter resumes the highlighted (newest) session and the
+                # history is rendered into the pane.
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertNotIsInstance(app.screen, SessionsScreen)
                 self.assertEqual(app.session_id, "20260802-130000")
                 self.assertTrue(app.resume_next)
-                self.assertIn("resuming 20260802-130000", "".join(app.transcript))
+                transcript = "".join(app.transcript)
+                self.assertIn("── resumed session 20260802-130000 ──", transcript)
+                self.assertIn("second", transcript)  # the session's user prompt
+
+        asyncio.run(flow())
+
+    def test_resume_shows_history(self):
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                sid = "20260802-140000"
+                sessions.append_event(
+                    sid, {"type": "user", "data": {"content": "first question"}}
+                )
+                sessions.append_event(
+                    sid,
+                    {
+                        "type": "assistant",
+                        "data": {
+                            "content": "first answer",
+                            "reasoning_content": "thoughts",
+                            "tool_calls": [
+                                {"id": "call_1", "name": "read", "arguments": '{"path":"x"}'}
+                            ],
+                        },
+                    },
+                )
+                sessions.append_event(
+                    sid,
+                    {
+                        "type": "tool_result",
+                        "data": {"tool_call_id": "call_1", "content": "file contents"},
+                    },
+                )
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = f"/resume {sid}"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.session_id, sid)
+                self.assertTrue(app.resume_next)
+                transcript = "".join(app.transcript)
+                self.assertIn("── resumed session 20260802-140000 ──", transcript)
+                self.assertIn("first question", transcript)  # user block
+                self.assertIn("first answer", transcript)  # assistant markdown
+                self.assertIn("⚙ read(", transcript)  # tool call line
+                self.assertIn("  → file contents", transcript)  # tool-result preview
+                self.assertNotIn("thoughts", transcript)  # verbose off
 
         asyncio.run(flow())
 

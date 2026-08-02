@@ -90,6 +90,14 @@ class TurnCancelled(Exception):
     """Raised by the emit callback when the user cancels the active turn."""
 
 
+def _call_name_args(call: dict) -> tuple[str, str]:
+    """Extract (name, arguments) from a persisted or OpenAI-wire tool_call dict."""
+    function = call.get("function")
+    if isinstance(function, dict):
+        return function.get("name", ""), function.get("arguments", "")
+    return call.get("name", ""), call.get("arguments", "")
+
+
 class PromptSubmitted(Message):
     """The prompt was submitted (Enter pressed with non-empty content)."""
 
@@ -1028,15 +1036,74 @@ class HarnessTui(App):
             )
 
     def _resume_session(self, sid: str) -> None:
-        """Switch the active session and continue from its history."""
+        """Switch the active session and render its history into the pane.
+
+        Clears the conversation, draws a dim header notice, then replays the
+        session's wire history (at most the last 40 messages) with the same
+        visual language as live turns, so the resumed conversation is visible
+        immediately. The next submitted prompt continues from this history.
+        """
         if self.turn_active:
             self._write_line("(busy — finish or cancel the current turn first)", classes="notice")
             return
         self.session_id = sid
         self.resume_next = True
         self.sub_title = f"{self.model_id} · {self.session_id}"
-        self._write_line(f"resuming {sid}")
+        self._conversation.remove_children()
+        self.transcript.clear()
+        self._follow = True
+        self._reset_turn_stream()
+        self._hide_thinking()
+        self._write_line(f"── resumed session {sid} ──", classes="notice")
+        self._render_history(sessions.load_messages(sid))
+        self._refresh_sessions()
         self._render_status()
+
+    def _render_history(self, wire_messages: list[dict]) -> None:
+        """Render a session's wire history (OpenAI wire dicts) into the pane.
+
+        Same visual language as live turns: user blocks, assistant label +
+        markdown (+ optional reasoning when verbose, + one dim line per tool
+        call), dim tool-result preview lines. Every line mirrors to
+        ``transcript``. At most the last 40 messages are rendered.
+        """
+        if len(wire_messages) > 40:
+            self._write_line("… (earlier messages omitted)", classes="notice")
+            wire_messages = wire_messages[-40:]
+        for wire in wire_messages:
+            role = wire.get("role")
+            if role == "user":
+                self._render_user_block(wire.get("content", ""))
+            elif role == "assistant":
+                self._render_history_assistant(wire)
+            elif role == "tool":
+                content = wire.get("content", "")
+                preview = content[:200] + ("…" if len(content) > 200 else "")
+                self.transcript.append(f"  → {preview}")
+                self._conversation.mount(
+                    Static(f"  → {preview}", classes="trace-line", markup=False)
+                )
+                self._scroll_follow()
+
+    def _render_history_assistant(self, wire: dict) -> None:
+        reasoning = wire.get("reasoning_content")
+        if reasoning and self.verbose:
+            self.transcript.append(f"💭 {reasoning}")
+            self._conversation.mount(
+                Static(f"💭 {reasoning}", classes="reasoning", markup=False)
+            )
+        self.transcript.append("▌ hdp")
+        content = wire.get("content", "")
+        self.transcript.append(content)
+        self._conversation.mount(Static("▌ hdp", classes="assistant-label", markup=False))
+        self._conversation.mount(Markdown(content, classes="assistant-md"))
+        for call in wire.get("tool_calls") or []:
+            name, args = _call_name_args(call)
+            self.transcript.append(f"⚙ {name}({args})")
+            self._conversation.mount(
+                Static(f"⚙ {name}({args})", classes="trace-line", markup=False)
+            )
+        self._scroll_follow()
 
     def action_resume_session(self, sid: str) -> None:
         """Resume a session from a sidebar Sessions row click."""
@@ -1115,12 +1182,7 @@ class HarnessTui(App):
             if not arg:
                 self._write_line("usage: /resume <session-id>", classes="notice")
                 return
-            self.session_id = arg
-            self.resume_next = True
-            self.sub_title = f"{self.model_id} · {self.session_id}"
-            self._write_line(f"resuming {arg}")
-            self._refresh_sessions()
-            self._render_status()
+            self._resume_session(arg)
         elif cmd == "/sessions":
             entries = sorted(
                 sessions.list_sessions(), key=lambda e: e["id"], reverse=True
