@@ -14,10 +14,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from textual.widgets import Input, Label, ListView, TextArea
 
 from harness import config, sessions
+from harness.art import SEA_LION
 from harness.tui import ConnectScreen, HarnessTui, SessionsScreen
 
 FW = "\uff5c"  # fullwidth vertical bar: DSML envelope delimiter
@@ -273,6 +275,44 @@ class TestTui(unittest.TestCase):
                 self.assertEqual(
                     app._suggestion_rows, ["20260802-130000", "20260802-120000"]
                 )
+
+        asyncio.run(flow())
+
+    def test_sea_lion_art_shape(self):
+        lines = SEA_LION.splitlines()
+        self.assertTrue(lines)
+        self.assertLessEqual(len(lines), 26)
+        self.assertGreaterEqual(len(lines), 20)
+        for line in lines:
+            self.assertLessEqual(len(line), 80)
+            self.assertNotIn("\t", line)
+        widths = [len(line) for line in lines]
+        self.assertLessEqual(max(widths) - min(widths), 2)  # padded rectangle
+
+    def test_home_art(self):
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                transcript = "\n".join(app.transcript)
+                self.assertIn(SEA_LION.splitlines()[0], transcript)
+                self.assertIn("Ask a task, or /help", transcript)
+                # /new re-renders the home hero with a fresh session.
+                app.resume_next = True
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/new"
+                prompt.focus()
+                with mock.patch(
+                    "harness.sessions.new_session_id", return_value="20260802-999999"
+                ):
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                self.assertEqual(app.session_id, "20260802-999999")
+                self.assertFalse(app.resume_next)
+                transcript = "\n".join(app.transcript)
+                self.assertIn(SEA_LION.splitlines()[0], transcript)
+                self.assertIn("Ask a task, or /help", transcript)
 
         asyncio.run(flow())
 

@@ -42,6 +42,7 @@ from textual.widgets import (
 )
 
 from harness import config, sessions
+from harness.art import SEA_LION
 from harness.gateway import Gateway
 from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
@@ -544,6 +545,10 @@ class HarnessTui(App):
         max-height: 50%;
         margin-bottom: 1;
     }
+
+    .sea-lion {
+        color: $accent;
+    }
     """
 
     BINDINGS = [
@@ -659,10 +664,7 @@ class HarnessTui(App):
         self._trace = self.query_one("#trace", VerticalScroll)
         self._prompt_input = self.query_one("#prompt", PromptInput)
         self._suggestions = self.query_one("#suggestions", Vertical)
-        self._write_line(
-            f"hdp — {self.model_id} agent. Ask a task, or /help for commands.",
-            classes="welcome",
-        )
+        self._render_home()
         self._refresh_memory()
         self._refresh_sessions()
         self._render_status()
@@ -979,6 +981,27 @@ class HarnessTui(App):
 
     # -- conversation helpers -----------------------------------------------
 
+    def _render_home(self) -> None:
+        """Render the sea lion hero + welcome line (startup and `/new`).
+
+        Clears the pane and live-stream state, then mounts the art as one
+        Static and mirrors every art line plus the welcome line into the
+        transcript, in order.
+        """
+        self._conversation.remove_children()
+        self.transcript.clear()
+        self._follow = True
+        self._reset_turn_stream()
+        self._hide_thinking()
+        for line in SEA_LION.splitlines():
+            self.transcript.append(line)
+        self._conversation.mount(Static(SEA_LION, classes="sea-lion", markup=False))
+        welcome = f"hdp — {self.model_id} agent. Ask a task, or /help for commands."
+        self.transcript.append(welcome)
+        self._conversation.mount(Static(welcome, classes="welcome", markup=False))
+        # Hero art: start at the top so the sea lion's head is in view.
+        self._conversation.scroll_to(y=0, animate=False)
+
     def _render_user_block(self, text: str) -> None:
         self.transcript.append(f"▌ you\n{text}")
         self._conversation.mount(Static(f"▌ you\n{text}", classes="user-block", markup=False))
@@ -1173,9 +1196,7 @@ class HarnessTui(App):
             self.session_id = sessions.new_session_id()
             self.resume_next = False
             self.sub_title = f"{self.model_id} · {self.session_id}"
-            self._conversation.remove_children()
-            self.transcript.clear()
-            self._follow = True
+            self._render_home()
             self._refresh_sessions()
             self._render_status()
         elif cmd == "/resume":
