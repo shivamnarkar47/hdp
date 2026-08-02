@@ -32,6 +32,11 @@ from harness.tui import (
     SessionsScreen,
 )
 
+try:
+    from textual_image.widget import Image
+except ImportError:
+    Image = None  # optional runtime dep (CI `pip install -e .` pulls textual only)
+
 FW = "\uff5c"  # fullwidth vertical bar: DSML envelope delimiter
 
 
@@ -833,6 +838,44 @@ class TestTui(unittest.TestCase):
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
+
+        asyncio.run(flow())
+
+    def test_home_image_mounted(self):
+        async def flow() -> None:
+            if Image is None:
+                self.skipTest("textual-image not installed")
+            app = self._app()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                image = app.query_one(Image)
+                # The widget holds the repo-root path it was given.
+                self.assertTrue(Path(image.image).is_file())
+                transcript = "\n".join(app.transcript)
+                self.assertIn(BANNER_TITLE, transcript)
+                self.assertIn(BANNER_TAGLINE, transcript)
+                self.assertIn("Ask a task, or /help", transcript)
+
+        asyncio.run(flow())
+
+    def test_home_image_missing_falls_back(self):
+        async def flow() -> None:
+            from harness import tui as tui_module
+
+            app = self._app()
+            with mock.patch.object(
+                tui_module, "HOME_IMAGE", Path(self.root) / "no-such-image.jpeg"
+            ):
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    transcript = "\n".join(app.transcript)
+                    # Text banner intact, no exception from the missing image.
+                    self.assertIn(BANNER_TITLE, transcript)
+                    self.assertIn(BANNER_TAGLINE, transcript)
+                    self.assertIn("Ask a task, or /help", transcript)
+                    if Image is not None:
+                        # Empty DOMQuery has no `__eq__` against a plain list.
+                        self.assertEqual(len(app.query(Image)), 0)
 
         asyncio.run(flow())
 
