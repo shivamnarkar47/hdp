@@ -86,7 +86,7 @@
 | `/verbose` | toggle reasoning display |
 | `/quit` | exit |
 
-**TUI keys:** `Ctrl+C` cancels the running turn (cooperative) · `Ctrl+Q` quits · `up`/`down` walk prompt history.
+**TUI keys:** `Ctrl+C` cancels the running turn (cooperative) · `Ctrl+Q` quits · `up`/`down` walk prompt history. The TUI's font is terminal-side, not app-side: configure the emulator (Fira Sans Condensed; see `docs/terminal-setup.md`).
 
 ## 2. Architecture
 

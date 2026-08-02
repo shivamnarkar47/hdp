@@ -199,17 +199,19 @@ def _build_headers(api_key: str) -> dict:
     }
 
 
-def _build_body(model_id: str, messages: list, tools: list | None) -> dict:
+def _build_body(model_id: str, messages: list, tools: list | None, max_tokens: int | None = None) -> dict:
     """Build the chat-completions request body.
 
     The "tools" key is omitted entirely when no tools are given, and unsupported
     fields (tool_choice, temperature, stream_options, store) are never sent —
-    this model rejects them.
+    this model rejects them. ``max_tokens`` None -> the harness default
+    (MAX_OUTPUT_TOKENS); callers may cap it lower (e.g. the TUI's AI agent
+    generator only needs a small JSON reply).
     """
     body: dict = {
         "model": model_id,
         "messages": messages,
-        "max_tokens": MAX_OUTPUT_TOKENS,
+        "max_tokens": max_tokens or MAX_OUTPUT_TOKENS,
         "stream": True,
     }
     if tools:
@@ -295,19 +297,22 @@ class Gateway:
         self.model_id = model_id
 
     def stream(
-        self, messages: list[dict], tools: list[dict] | None = None
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
     ) -> Generator[StreamEvent, None, None]:
         """Stream chat completions; yields content/reasoning/tool_call/done events.
 
         Retries (5xx, network errors, and HTTP 429 rate limits — all only before
         any event was yielded) up to 3 attempts total with 1s/2s/4s backoff; a
         429's Retry-After header extends the sleep (capped at 60s). Other 4xx
-        errors raise immediately.
+        errors raise immediately. ``max_tokens`` None -> MAX_OUTPUT_TOKENS.
         """
         url = self.base_url.rstrip("/") + "/chat/completions"
         request = urllib.request.Request(
             url,
-            data=json.dumps(_build_body(self.model_id, messages, tools)).encode("utf-8"),
+            data=json.dumps(_build_body(self.model_id, messages, tools, max_tokens)).encode("utf-8"),
             headers=_build_headers(self.api_key),
             method="POST",
         )

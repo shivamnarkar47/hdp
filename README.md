@@ -36,6 +36,7 @@ Both installers honor the `HDP_REPO_URL`, `HDP_INSTALL_DIR`, and `HDP_BIN_DIR` e
 - `hdp sessions list` — list past sessions
 - `hdp sessions show|delete|prune` — inspect/delete/prune sessions; `hdp doctor` — self-check; `hdp run -` — read the prompt from stdin; `hdp --version`
 - TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/connect`, `/structure`, `/memory`, `/model`, `/verbose`, `/quit`
+- terminal font: Fira Sans Condensed — see `docs/terminal-setup.md`
 
 The project tree is scanned automatically and cached in `.hdp/STRUCTURE.md` (git-ignored, regenerable); it's injected into the system prompt and refreshed when files change. `.hdp/` also holds the read-only tool-result cache (`tool-cache.json`, keyed to the tree signature, `--no-tool-cache` to disable) and optional verify hooks (`hooks.json`, run after mutating steps, `--no-verify` to disable).
 

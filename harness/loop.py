@@ -108,6 +108,7 @@ class AgentLoop:
         structure: Any = None,
         enable_verify: bool = True,
         spawn_depth: int = 1,
+        agent: dict | None = None,
     ) -> None:
         self.gateway = gateway
         self.tools = tools
@@ -118,6 +119,11 @@ class AgentLoop:
         self.resume = resume
         self._structure = structure
         self.enable_verify = enable_verify
+        # Active persona (a harness.agents dict {name, description}) injected
+        # into the system prompt; None = no persona. Deliberately NOT inherited
+        # by nested spawn_agent loops (see _spawn) — a spawned sub-task runs as
+        # a plain agent, not as a second copy of the persona.
+        self.agent = agent
         # Nested-agent nesting level: the top-level loop is depth 1, a spawned
         # loop is depth 2, and spawning is disabled at depth >= 2 (recursion
         # capped at two nested loops). See _spawn.
@@ -172,7 +178,9 @@ class AgentLoop:
 
         system = SystemMessage(
             prompts.build_system_prompt(
-                self.memory.load_digest(), prompts.build_project_context(self.tools.project_dir)
+                self.memory.load_digest(),
+                prompts.build_project_context(self.tools.project_dir),
+                self.agent,
             )
         )
         self._system = system
@@ -591,6 +599,9 @@ class AgentLoop:
             allow_dangerous=False,
             enable_verify=False,
             spawn_depth=self._spawn_depth + 1,
+            # no agent=: the persona is NOT inherited by nested loops — a
+            # spawned sub-task runs as a plain agent, never as a second copy
+            # of the active persona (see __init__).
         )
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(nested.run, task)  # emit=None: nothing bubbles up

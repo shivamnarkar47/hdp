@@ -21,6 +21,7 @@ one literal code block.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -47,9 +48,9 @@ from textual.widgets import (
     TextArea,
 )
 
-from harness import config, sessions
-from harness.art import SEA_LION
-from harness.gateway import Gateway
+from harness import agents, config, sessions
+from harness.art import BANNER_TAGLINE, BANNER_TITLE
+from harness.gateway import Gateway, GatewayError
 from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
 from harness.structure import StructureManager
@@ -134,10 +135,57 @@ COMMANDS = [
     "/connect",
     "/quit",
     "/structure",
+    "/agents",
 ]
 
 # Braille spinner frames for the "thinking" indicator.
 THINK_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# System prompt for the Ctrl+G AI agent generator: the model must reply with
+# ONLY a JSON object (name + description). Kept tight; no tools are offered.
+AGENT_GENERATOR_SYSTEM_PROMPT = """\
+You are an agent designer for a coding harness. The user describes an agent
+persona they want. Respond with ONLY a JSON object: {"name": "<a strong,
+fitting name — prefer Sanskrit/epic-flavored names in the spirit of the
+Pandavas>", "description": "<one or two sentences describing the persona's
+strengths and style>"}."""
+
+# System prompt for the /agents -> n create flow: the user typed only a
+# description; the model picks a fitting Mahabharata name and polishes the
+# description (same JSON contract as Ctrl+G).
+AGENT_FROM_DESCRIPTION_SYSTEM_PROMPT = """\
+You are an agent designer for a coding harness. The user describes an agent
+persona they want. Generate a fitting NAME for it in the spirit of the
+Mahabharata — a character, title, or concept from the epic (e.g. Karna,
+Dronacharya, Shakuni, Abhimanyu), or a Sanskrit-flavored title. Respond with
+ONLY a JSON object: {"name": "<name>", "description": "<a polished one or
+two sentence version of the user's description>"}."""
+
+# Cap for the generator completion: a tiny JSON reply, nothing more.
+AGENT_GENERATOR_MAX_TOKENS = 300
+
+
+def _parse_agent_json(reply: str) -> dict | None:
+    """Extract a {name, description} agent dict from a generator reply.
+
+    ``json.loads`` first; on failure, tolerantly grabs the first ``{`` to the
+    last ``}`` (models love surrounding prose). Returns None when no usable
+    name survives.
+    """
+    text = reply.strip()
+    for candidate in (text, text[text.find("{"): text.rfind("}") + 1]):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("name"):
+            return {
+                "name": str(parsed["name"]).strip(),
+                "description": str(parsed.get("description", "")).strip(),
+            }
+    return None
 
 
 class TurnCancelled(Exception):
@@ -413,6 +461,137 @@ class SessionsScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class AgentsScreen(ModalScreen[tuple[str, str] | str | None]):
+    """Modal agent switcher: Enter activates, `n` creates, `d` deletes.
+
+    Dismisses with a payload the app's result callback understands:
+    ``("activate", name)`` | ``("delete", name)`` | ``"new"`` | None (Esc).
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+        Binding("n", "new", "New"),
+        Binding("d", "delete", "Delete"),
+    ]
+
+    def __init__(self, agent_list: list[dict]) -> None:
+        super().__init__()
+        self._agents = agent_list
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sessions-box"):
+            yield Static("Agents", classes="connect-title")
+            if self._agents:
+                yield ListView(
+                    *[
+                        ListItem(Label(f"{a['name']} — {a.get('description', '')[:40]}"))
+                        for a in self._agents
+                    ],
+                    id="agent-list",
+                )
+            else:
+                yield Static("(no agents — press n to create)", classes="connect-hint")
+            yield Static(
+                "Enter activate · n new · d delete · Esc close", classes="connect-hint"
+            )
+
+    def on_mount(self) -> None:
+        if self._agents:
+            self.query_one("#agent-list", ListView).focus()
+
+    @on(ListView.Selected)
+    def _on_selected(self, event: ListView.Selected) -> None:
+        index = self.query_one("#agent-list", ListView).index
+        self.dismiss(("activate", self._agents[index]["name"]))
+
+    def action_new(self) -> None:
+        self.dismiss("new")
+
+    def action_delete(self) -> None:
+        if not self._agents:
+            return
+        index = self.query_one("#agent-list", ListView).index
+        self.dismiss(("delete", self._agents[index]["name"]))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AgentFormScreen(ModalScreen[str | None]):
+    """Agent creation form: ONE description input; the name is AI-generated.
+
+    The user describes the persona; Save runs the same generator path as
+    Ctrl+G — the model picks a Mahabharata-spirited name and polishes the
+    description. Enter saves, Esc cancels.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connect-box"):
+            yield Static("New agent", classes="connect-title")
+            yield Label("Description", classes="connect-hint")
+            yield Input(
+                placeholder="describe the persona — the name will be AI-generated",
+                id="agent-desc-input",
+            )
+            with Horizontal(id="connect-buttons"):
+                yield Button("Save", id="save-btn", variant="primary")
+                yield Button("Cancel", id="cancel-btn")
+
+    def on_mount(self) -> None:
+        self.query_one("#agent-desc-input", Input).focus()
+
+    @on(Input.Submitted)
+    def _on_submitted(self, event: Input.Submitted) -> None:
+        self._save()
+
+    @on(Button.Pressed)
+    def _on_button(self, event: Button.Pressed) -> None:
+        if event.button.id == "save-btn":
+            self._save()
+        elif event.button.id == "cancel-btn":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _save(self) -> None:
+        description = self.query_one("#agent-desc-input", Input).value.strip()
+        if not description:
+            self.query_one("#agent-desc-input", Input).focus()  # guard empty
+            return
+        self.dismiss(description)
+
+
+class AgentIntentScreen(ModalScreen[str | None]):
+    """AI agent generator prompt: one intent line; Enter generates, Esc cancels."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connect-box"):
+            yield Static("Generate agent (AI)", classes="connect-title")
+            yield Input(placeholder="Describe the agent you want…", id="agent-intent-input")
+            yield Static("Enter generates · Esc cancels", classes="connect-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#agent-intent-input", Input).focus()
+
+    @on(Input.Submitted)
+    def _on_submitted(self, event: Input.Submitted) -> None:
+        intent = event.input.value.strip()
+        if intent:
+            self.dismiss(intent)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HarnessTui(App):
     """Split-pane chat TUI for hdp."""
 
@@ -558,7 +737,10 @@ class HarnessTui(App):
     }
 
     ConnectScreen,
-    SessionsScreen {
+    SessionsScreen,
+    AgentsScreen,
+    AgentFormScreen,
+    AgentIntentScreen {
         align: center middle;
     }
 
@@ -594,14 +776,24 @@ class HarnessTui(App):
         width: 1fr;
     }
 
-    #session-list {
+    #session-list,
+    #agent-list {
         height: auto;
         max-height: 50%;
         margin-bottom: 1;
     }
 
-    .sea-lion {
+    .banner-title {
         color: $accent;
+        text-style: bold;
+        text-align: center;
+        margin-top: 2;
+    }
+
+    .banner-tagline {
+        color: $text-muted;
+        text-align: center;
+        margin-bottom: 1;
     }
     """
 
@@ -612,6 +804,11 @@ class HarnessTui(App):
         # Plain app-level binding is enough: TextArea never binds Ctrl+S, so
         # the unhandled key bubbles up from the focused prompt to the App.
         Binding("ctrl+s", "toggle_sidebar", "Sidebar", show=False),
+        # Ctrl+G ("generate") opens the AI agent generator. priority=True so it
+        # wins even while the prompt has focus: TextArea binds Ctrl+A to
+        # cursor_line_start (select-all territory), so Ctrl+A would be
+        # swallowed whenever the prompt is focused — Ctrl+G is unbound there.
+        Binding("ctrl+g", "agent_intent", "New agent (AI)", show=False, priority=True),
     ]
 
     def __init__(
@@ -630,6 +827,17 @@ class HarnessTui(App):
         self.gateway = gateway
         self.model_id: str = getattr(gateway, "model_id", None) or model_id or config.MODEL_ID
         self.project_dir = Path(project_dir or Path.cwd())
+        # Agent personas (harness.agents): seeded with the five Pandavas when
+        # .hdp/agents.json is missing; `active` picks the persona injected
+        # into every fresh AgentLoop (None = no persona). The persona is on by
+        # default: when nothing is active, activate the first agent
+        # (Yudhishthira) and persist, so the status bar always leads with a
+        # real name and the persona shapes turns from the first prompt.
+        self._agents = agents.load(self.project_dir)
+        if agents.active_agent(self._agents) is None and self._agents["agents"]:
+            self._agents["active"] = self._agents["agents"][0]["name"]
+            agents.save(self.project_dir, self._agents)
+        self._active_agent = agents.active_agent(self._agents)
         self.max_steps = max_steps
         self.allow_dangerous = allow_dangerous
 
@@ -858,6 +1066,7 @@ class HarnessTui(App):
             allow_dangerous=self.allow_dangerous,
             resume=self.resume_next,
             structure=self.structure,
+            agent=self._active_agent,
         )
         self._agent_loop = loop
         self._current_task = task
@@ -1097,24 +1306,27 @@ class HarnessTui(App):
     # -- conversation helpers -----------------------------------------------
 
     def _render_home(self) -> None:
-        """Render the sea lion hero + welcome line (startup and `/new`).
+        """Render the KESHAVLOK banner + welcome line (startup and `/new`).
 
-        Clears the pane and live-stream state, then mounts the art as one
-        Static and mirrors every art line plus the welcome line into the
-        transcript, in order.
+        Clears the pane and live-stream state, then mounts the banner title
+        (accent/bold) and tagline (dim) as styled Statics, and mirrors every
+        line plus the welcome line into the transcript, in order.
         """
         self._conversation.remove_children()
         self.transcript.clear()
         self._follow = True
         self._reset_turn_stream()
         self._hide_thinking()
-        for line in SEA_LION.splitlines():
-            self.transcript.append(line)
-        self._conversation.mount(Static(SEA_LION, classes="sea-lion", markup=False))
+        self.transcript.append(BANNER_TITLE)
+        self._conversation.mount(Static(BANNER_TITLE, classes="banner-title", markup=False))
+        self.transcript.append(BANNER_TAGLINE)
+        self._conversation.mount(
+            Static(BANNER_TAGLINE, classes="banner-tagline", markup=False)
+        )
         welcome = f"hdp — {self.model_id} agent. Ask a task, or /help for commands."
         self.transcript.append(welcome)
         self._conversation.mount(Static(welcome, classes="welcome", markup=False))
-        # Hero art: start at the top so the sea lion's head is in view.
+        # Banner first: start at the top so the title is in view.
         self._conversation.scroll_to(y=0, animate=False)
 
     def _structure_notice(self) -> None:
@@ -1290,12 +1502,155 @@ class HarnessTui(App):
         if key:
             self._set_api_key(key)
 
+    # -- agents -------------------------------------------------------------
+
+    def _on_agents_result(self, result: tuple[str, str] | str | None) -> None:
+        """Result callback from the /agents popup.
+
+        ("activate", name) / ("delete", name) / "new" / None (cancelled).
+        Agent activations are session state, not session events — nothing is
+        written to the session JSONL; .hdp/agents.json covers persistence.
+        """
+        if result is None:
+            return
+        if isinstance(result, tuple):
+            action, name = result
+            if action == "activate":
+                self._activate_agent(name)
+            elif action == "delete":
+                self._delete_agent(name)
+        elif result == "new":
+            self.push_screen(AgentFormScreen(), self._on_agent_form_result)
+
+    def _on_agent_form_result(self, description: str | None) -> None:
+        """Result callback from the /agents -> n form (None = cancelled).
+
+        The user only writes a description; the name is AI-generated by the
+        same generator path as Ctrl+G (Mahabharata-spirited, polished).
+        """
+        if description:
+            self._generate_agent(
+                description, AGENT_FROM_DESCRIPTION_SYSTEM_PROMPT, "created and active"
+            )
+
+    def _activate_agent(self, name: str) -> None:
+        """Set the active persona, persist, and confirm (next turn uses it)."""
+        self._agents["active"] = name
+        agents.save(self.project_dir, self._agents)
+        self._active_agent = agents.active_agent(self._agents)
+        self._write_line(f"agent: {name} active", classes="notice")
+        self._render_status()  # the bar leads with the active agent's name
+
+    def _add_agent(self, agent: dict, notice: str | None = None) -> None:
+        """Add a new agent, activate it, persist, and confirm."""
+        self._agents["agents"].append(agent)
+        self._agents["active"] = agent["name"]
+        agents.save(self.project_dir, self._agents)
+        self._active_agent = agents.active_agent(self._agents)
+        self._write_line(notice or f"agent: {agent['name']} added and active", classes="notice")
+        self._render_status()
+
+    def _delete_agent(self, name: str) -> None:
+        """Delete an agent; if it was active, active becomes None."""
+        self._agents["agents"] = [
+            a for a in self._agents["agents"] if a.get("name") != name
+        ]
+        if self._agents.get("active") == name:
+            self._agents["active"] = None
+        agents.save(self.project_dir, self._agents)
+        self._active_agent = agents.active_agent(self._agents)
+        self._write_line(f"agent: {name} deleted", classes="notice")
+        self._render_status()
+
+    # -- Ctrl+G: AI agent generator -----------------------------------------
+
+    def action_agent_intent(self) -> None:
+        """Ctrl+G: open the AI agent generator (gateway completion, no tools)."""
+        if self.turn_active:
+            self._write_line("(busy — wait for the current turn)", classes="notice")
+            return
+        if len(self.screen_stack) > 1:
+            # A modal is already up (e.g. /sessions); don't stack another.
+            return
+        self.push_screen(AgentIntentScreen(), self._on_agent_intent)
+
+    def _on_agent_intent(self, intent: str | None) -> None:
+        """Result callback from the intent screen (None = cancelled)."""
+        if intent:
+            self._generate_agent(
+                intent, AGENT_GENERATOR_SYSTEM_PROMPT, "generated and active"
+            )
+
+    def _generate_agent(self, prompt: str, system_prompt: str, phrase: str) -> None:
+        """Run one agent-generation completion on a worker thread.
+
+        Shared by Ctrl+G (a free-form intent; the model invents the whole
+        persona) and the /agents -> n form (a description; the model picks the
+        name and polishes the text) — the only difference is the system-prompt
+        wording. On success the new agent is added + activated + persisted;
+        on failure a notice is written, no crash. The thinking indicator
+        stays up until the worker marshals the result back (call_from_thread).
+        """
+        self.turn_active = True  # guards re-entry (action_agent_intent)
+        self._show_thinking()
+        # run_worker takes no worker args (Textual 8.x), so the generator
+        # arguments ride in a closure, like _start_turn reads _current_task.
+        self.run_worker(
+            lambda: self._generate_agent_thread(prompt, system_prompt, phrase),
+            thread=True,
+            group="agent-generator",
+        )
+
+    def _generate_agent_thread(self, prompt: str, system_prompt: str, phrase: str) -> None:
+        """Worker thread body for the generator. Never touches widgets."""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            reply = ""
+            for event in self.gateway.stream(
+                messages, tools=None, max_tokens=AGENT_GENERATOR_MAX_TOKENS
+            ):
+                kind = event[0]
+                if kind == "content":
+                    reply += event[1]  # type: ignore[operator]
+                elif kind == "error":
+                    raise GatewayError(event[1])  # type: ignore[arg-type]
+                elif kind == "done":
+                    break
+            self.call_from_thread(self._on_generator_done, reply, phrase)
+        except Exception as exc:
+            # Broad catch (incl. GatewayError): a transport/model slip must
+            # never crash the TUI.
+            self.call_from_thread(self._on_generator_error, str(exc))
+
+    def _on_generator_done(self, reply: str, phrase: str) -> None:
+        """Main thread: parse the reply; add + activate on success."""
+        self.turn_active = False
+        self._hide_thinking()
+        agent = _parse_agent_json(reply)
+        if agent is None:
+            self._write_line(
+                "agent generator: could not parse a name/description", classes="error-box"
+            )
+            return
+        self._add_agent(agent, notice=f"agent: {agent['name']} {phrase}")
+
+    def _on_generator_error(self, message: str) -> None:
+        """Main thread: generator failure — dim notice, no crash."""
+        self.turn_active = False
+        self._hide_thinking()
+        self._write_line(f"agent generator: {message}", classes="error-box")
+
     # -- status bar ---------------------------------------------------------
 
     # tmux-style segmented blocks. Hardcoded ANSI-safe colors that read well
     # on Textual's default dark theme (Rich Text styles cannot resolve
     # Textual $design tokens, so the block backgrounds are literals); the
-    # center segment is unstyled and inherits #status's muted CSS color.
+    # center segment is unstyled and inherits #status's muted CSS color. The
+    # agent block is inverted (dark text on light) so it pops from the rest.
+    _STATUS_AGENT_STYLE = "bold #1f2430 on #81a1c1"
     _STATUS_LEFT_STYLE = "bold #d7dae0 on #1f2430"
     _STATUS_RIGHT_STYLE = "bold #eceff4 on #3b4252"
 
@@ -1307,18 +1662,34 @@ class HarnessTui(App):
         return self.session_id[-6:]
 
     def _status_bar(self, short_model: bool = False) -> Text:
-        """Build the tmux-style bar: left session block, muted center, clock."""
+        """Build the tmux-style bar: agent block, left block, muted center, clock.
+
+        The first segment is the active agent's name (its own inverted block);
+        "—" when no agent is active. ``short_model`` is the >90-char fallback:
+        it shortens the model, drops the session suffix, and caps an over-long
+        agent name (agent names are short by design) — every metric segment
+        and the clock stay.
+        """
         model = self.model_id
         if short_model:
             # deepseek-v4-flash -> v4-flash (last two dash chunks).
             model = "-".join(model.split("-")[-2:])
+        agent_name = self._active_agent["name"] if self._active_agent else "—"
+        clock = datetime.now().strftime("%a %d %b %H:%M")
+        left = f" hdp · {model} · {self._session_short()} "
+        if short_model:
+            left = f" hdp · {model} "
+            # Agent names are short by design (<= the 12-char Yudhishthira);
+            # the >90-char fallback also drops the clock's weekday.
+            if len(agent_name) > 12:
+                agent_name = agent_name[:12]
+            clock = datetime.now().strftime("%d %b %H:%M")
         rate = self.tools.cache_hit_rate()
         cache = "cache –" if rate is None else f"cache {rate * 100:.0f}%"
-        clock = datetime.now().strftime("%a %d %b %H:%M")
         bar = Text()
-        bar.append(
-            f" hdp · {model} · {self._session_short()} ", style=self._STATUS_LEFT_STYLE
-        )
+        bar.append(f" {agent_name} ", style=self._STATUS_AGENT_STYLE)
+        bar.append("│")
+        bar.append(left, style=self._STATUS_LEFT_STYLE)
         bar.append("│")
         bar.append(f" step {self._steps}/{self.max_steps} ")
         bar.append("│")
@@ -1440,6 +1811,10 @@ class HarnessTui(App):
             )
             self.push_screen(SessionsScreen(entries), self._on_session_selected)
             self._refresh_sessions()
+        elif cmd == "/agents":
+            self.push_screen(
+                AgentsScreen(self._agents.get("agents", [])), self._on_agents_result
+            )
         elif cmd == "/connect":
             if arg:
                 self._set_api_key(arg)  # inline key, no popup
@@ -1480,13 +1855,13 @@ class HarnessTui(App):
 
     def _help(self) -> None:
         self._write_line(
-            "commands: /help /new /resume <id> /sessions /memory /model /verbose "
-            "/sidebar /connect /structure /quit"
+            "commands: /help /new /resume <id> /sessions /agents /memory /model "
+            "/verbose /sidebar /connect /structure /quit"
         )
         self._write_line(
             "keys: enter send · shift+enter newline · ctrl+p/n history · "
-            "tab complete · ctrl+l bottom · ctrl+s sidebar · ctrl+c cancel · "
-            "ctrl+q quit"
+            "tab complete · ctrl+l bottom · ctrl+s sidebar · ctrl+g new agent (AI) · "
+            "ctrl+c cancel · ctrl+q quit"
         )
 
 

@@ -20,9 +20,16 @@ from unittest import mock
 from textual.containers import Vertical
 from textual.widgets import Input, Label, ListView, Static, TextArea
 
-from harness import config, sessions
-from harness.art import SEA_LION
-from harness.tui import ConnectScreen, HarnessTui, SessionsScreen
+from harness import agents, config, sessions
+from harness.art import BANNER_TAGLINE, BANNER_TITLE, SEA_LION
+from harness.tui import (
+    AgentFormScreen,
+    AgentIntentScreen,
+    AgentsScreen,
+    ConnectScreen,
+    HarnessTui,
+    SessionsScreen,
+)
 
 FW = "\uff5c"  # fullwidth vertical bar: DSML envelope delimiter
 
@@ -58,7 +65,7 @@ class FakeGateway:
         self.scripts = list(scripts)
         self.model_id = "fake-model"
 
-    def stream(self, messages, tools):
+    def stream(self, messages, tools=None, max_tokens=None):
         yield from self.scripts.pop(0)
 
 
@@ -263,6 +270,179 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_agents_popup_lists_and_activates(self):
+        """/agents opens the switcher listing the five Pandavas; Enter on the
+        highlighted row (Yudhishthira) activates it, persists, and the status
+        bar leads with the active agent's name."""
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                # Startup auto-activation: the first Pandava is active already.
+                self.assertEqual(app._active_agent["name"], "Yudhishthira")
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/agents"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, AgentsScreen)
+                list_view = app.screen.query_one("#agent-list", ListView)
+                self.assertGreaterEqual(len(list_view.children), 5)
+                first_row = str(list_view.children[0].query_one(Label).render())
+                self.assertIn("Yudhishthira", first_row)
+                # Enter activates the highlighted (first: Yudhishthira).
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, AgentsScreen)
+                self.assertEqual(app._active_agent["name"], "Yudhishthira")
+                self.assertIn(
+                    "agent: Yudhishthira active", "\n".join(app.transcript)
+                )
+                # Persisted: a fresh load sees Yudhishthira active.
+                self.assertEqual(agents.load(self.root)["active"], "Yudhishthira")
+                # The status bar starts with the active agent's name.
+                status = str(app.query_one("#status", Static).render())
+                self.assertTrue(status.lstrip().startswith("Yudhishthira"))
+                # Selecting Arjuna updates both the persona and the bar.
+                prompt.text = "/agents"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("down")
+                await pilot.pause()
+                await pilot.press("down")  # row 2: Bhima(1) -> Arjuna(2)
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app._active_agent["name"], "Arjuna")
+                status = str(app.query_one("#status", Static).render())
+                self.assertTrue(status.lstrip().startswith("Arjuna"))
+
+        asyncio.run(flow())
+
+    def test_agents_form_generates_agent(self):
+        """/agents -> n: the form has a SINGLE description input (no manual
+        name field); saving runs the AI generator and the name comes back from
+        the scripted gateway JSON, added + activated."""
+        async def flow() -> None:
+            script = [
+                (
+                    "content",
+                    '{"name": "Karna", "description": "the relentless executor"}',
+                ),
+                ("done", "stop"),
+            ]
+            app = HarnessTui(
+                gateway=FakeGateway(script),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/agents"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("n")  # new
+                await pilot.pause()
+                self.assertIsInstance(app.screen, AgentFormScreen)
+                # One input only — the description; no name input exists.
+                self.assertEqual(len(app.screen.query(Input)), 1)
+                self.assertEqual(
+                    app.screen.query_one("#agent-desc-input", Input).id, "agent-desc-input"
+                )
+                desc_input = app.screen.query_one("#agent-desc-input", Input)
+                desc_input.value = "a relentless executor who never stops"
+                desc_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")  # Enter saves -> AI generation
+                # Poll until the generator worker marshals the result back.
+                for _ in range(200):  # up to ~10s
+                    if any("created and active" in line for line in app.transcript):
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                self.assertIn(
+                    "agent: Karna created and active", "\n".join(app.transcript)
+                )
+                self.assertEqual(app._active_agent["name"], "Karna")
+                self.assertIn("Karna", [a["name"] for a in app._agents["agents"]])
+                self.assertFalse(app.turn_active)
+
+        asyncio.run(flow())
+
+    def test_ctrl_g_generates_agent(self):
+        """Ctrl+G opens the intent screen; a scripted gateway completion
+        streams a JSON agent dict; the new agent lands in state and activates."""
+        async def flow() -> None:
+            script = [
+                (
+                    "content",
+                    '{"name": "Karna", "description": "the relentless executor"}',
+                ),
+                ("done", "stop"),
+            ]
+            app = HarnessTui(
+                gateway=FakeGateway(script),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, AgentIntentScreen)
+                intent_input = app.screen.query_one("#agent-intent-input", Input)
+                intent_input.value = "a relentless executor who never stops"
+                intent_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                # Poll until the generator worker marshals the result back.
+                for _ in range(200):  # up to ~10s
+                    if any("generated and active" in line for line in app.transcript):
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                self.assertIn(
+                    "agent: Karna generated and active", "\n".join(app.transcript)
+                )
+                self.assertEqual(app._active_agent["name"], "Karna")
+                self.assertIn("Karna", [a["name"] for a in app._agents["agents"]])
+                self.assertFalse(app.turn_active)
+
+        asyncio.run(flow())
+
+    def test_ctrl_g_refuses_while_turn_active(self):
+        """Ctrl+G during a live turn is refused with a notice, no popup."""
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway(_thinking_script()),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "think"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.15)  # worker is mid-reasoning
+                self.assertTrue(app.turn_active)
+                await pilot.press("ctrl+g")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, AgentIntentScreen)
+                self.assertIn(
+                    "(busy — wait for the current turn)", "\n".join(app.transcript)
+                )
+                for _ in range(200):  # let the turn finish cleanly
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+
+        asyncio.run(flow())
+
     def test_slash_suggestions(self):
         async def flow() -> None:
             app = self._app()
@@ -362,15 +542,18 @@ class TestTui(unittest.TestCase):
         widths = [len(line) for line in lines]
         self.assertLessEqual(max(widths) - min(widths), 2)  # padded rectangle
 
-    def test_home_art(self):
+    def test_home_banner(self):
         async def flow() -> None:
             app = self._app()
             async with app.run_test() as pilot:
                 await pilot.pause()
                 transcript = "\n".join(app.transcript)
-                self.assertIn(SEA_LION.splitlines()[0], transcript)
+                self.assertIn(BANNER_TITLE, transcript)
+                self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
-                # /new re-renders the home hero with a fresh session.
+                # The sea lion is no longer the home hero (still exported).
+                self.assertNotIn(SEA_LION.splitlines()[0], transcript)
+                # /new re-renders the home banner with a fresh session.
                 app.resume_next = True
                 prompt = app.query_one("#prompt", TextArea)
                 prompt.text = "/new"
@@ -384,7 +567,8 @@ class TestTui(unittest.TestCase):
                 self.assertEqual(app.session_id, "20260802-999999")
                 self.assertFalse(app.resume_next)
                 transcript = "\n".join(app.transcript)
-                self.assertIn(SEA_LION.splitlines()[0], transcript)
+                self.assertIn(BANNER_TITLE, transcript)
+                self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
 
         asyncio.run(flow())
@@ -562,6 +746,9 @@ class TestTui(unittest.TestCase):
                 await self._submit_and_wait(app, "turn one", pilot)
                 await self._submit_and_wait(app, "turn two", pilot)
                 status = str(app.query_one("#status", Static).render())
+                # The bar leads with the active agent's name (auto-activated
+                # Yudhishthira at startup), then the session/model block.
+                self.assertTrue(status.lstrip().startswith("Yudhishthira"))
                 self.assertIn("step", status)
                 self.assertIn("tok/s", status)
                 self.assertIn("cache", status)

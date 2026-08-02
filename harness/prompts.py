@@ -35,15 +35,29 @@ FIXED_PREFIX: str = (
 )
 
 
-def build_system_prompt(memory_digest: str, project_context: str) -> str:
+def build_system_prompt(
+    memory_digest: str, project_context: str, agent: dict | None = None
+) -> str:
     """Assemble the full system prompt: fixed prefix + memory guidance + project.
 
-    Tier 3 is empty by design: per-turn content is the conversation itself, and
-    tool schemas travel only in the API `tools` parameter, never in prose.
+    When ``agent`` is given (a ``{name, description}`` persona dict from
+    harness.agents), a third `## Agent` block is appended telling the model
+    to adopt that persona fully. Tier 3 is empty by design: per-turn content
+    is the conversation itself, and tool schemas travel only in the API
+    `tools` parameter, never in prose.
     """
     dynamic = (
         f"## Memory Guidance\n\n{memory_digest}\n\n## Project\n\n{project_context}"
     )
+    if agent:
+        name = agent.get("name", "")
+        description = agent.get("description", "")
+        dynamic += (
+            f"\n\n## Agent\n"
+            f"You are operating as **{name}** — {description}.\n"
+            f"Adopt this persona fully: let {name}'s strengths shape how you "
+            f"approach the task."
+        )
     return "\n\n".join([FIXED_PREFIX, dynamic])
 
 

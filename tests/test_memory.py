@@ -232,6 +232,27 @@ class TestPrompts(unittest.TestCase):
             ctx = build_project_context(cwd)
             self.assertIn("No structure cache yet", ctx)
 
+    def test_build_system_prompt_without_agent(self):
+        digest = "### Project State\n- nothing yet"
+        project = "Date: 2026-08-02\nCWD: /tmp/x"
+        prompt = build_system_prompt(digest, project)
+        self.assertIn("## Memory Guidance", prompt)
+        self.assertIn("## Project", prompt)
+        self.assertNotIn("## Agent", prompt)
+
+    def test_build_system_prompt_with_agent(self):
+        """An agent persona appends a third `## Agent` block naming it."""
+        digest = "### Project State\n- nothing yet"
+        project = "Date: 2026-08-02\nCWD: /tmp/x"
+        prompt = build_system_prompt(
+            digest, project, {"name": "Arjuna", "description": "the Precise Marksman"}
+        )
+        self.assertIn("## Agent", prompt)
+        self.assertIn("Arjuna", prompt)
+        self.assertIn("the Precise Marksman", prompt)
+        # The persona block comes after the project block.
+        self.assertLess(prompt.index("## Project"), prompt.index("## Agent"))
+
     def test_build_system_prompt(self):
         digest = (
             "### Project State\n"

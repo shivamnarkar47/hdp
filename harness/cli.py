@@ -72,10 +72,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable the read-only tool-result cache (.hdp/tool-cache.json)",
     )
-    run_p.add_argument(
-        "--no-verify",
+    run_p.add_argument("--no-verify",
         action="store_true",
         help="disable verify hooks after mutation (.hdp/hooks.json)",
+    )
+    run_p.add_argument(
+        "--agent",
+        default=None,
+        metavar="NAME",
+        help="persona to operate as (name from .hdp/agents.json; the five Pandava defaults always exist)",
     )
 
     sessions_p = sub.add_parser("sessions", help="session store commands")
@@ -147,15 +152,27 @@ def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
     one fresh id per task — microsecond-precision, collision-free). Returns
     the success record ``{session_id, answer, steps, tool_calls, usage}`` or
     an error record ``{session_id, error, error_kind}`` where ``error_kind``
-    is one of "config" | "gateway" | "loop" (config/gateway -> exit 1,
-    loop -> exit 2, matching the pre-refactor single-run behavior).
+    is one of "config" | "gateway" | "loop" | "agent" (config/gateway/agent
+    -> exit 1, loop -> exit 2, matching the pre-refactor single-run behavior).
     """
     try:
         key = config.get_api_key()
     except SystemExit:
         # Missing/invalid key: config already printed the instructions.
         return {"session_id": session_id, "error": "no API key", "error_kind": "config"}
+    from harness import agents
+
     project_dir = Path(args.dir or Path.cwd())
+    agent = None
+    if getattr(args, "agent", None):
+        state = agents.load(project_dir)
+        agent = agents.active_agent({**state, "active": args.agent})
+        if agent is None:
+            return {
+                "session_id": session_id,
+                "error": f"no such agent: {args.agent}",
+                "error_kind": "agent",
+            }
     memory_root = Path(args.memory_root or project_dir / ".agent-memory")
     memory = Memory(memory_root)
     cache = None
@@ -179,6 +196,7 @@ def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
         allow_dangerous=args.allow_dangerous,
         resume=bool(args.resume),
         enable_verify=not args.no_verify,
+        agent=agent,
     )
     tool_calls = 0
 
@@ -367,6 +385,9 @@ def _doctor(args: argparse.Namespace) -> int:
     except ImportError:
         textual_version = "MISSING"
     print(f"textual: {textual_version}")
+
+    terminal = os.environ.get("TERM_PROGRAM") or os.environ.get("TERM") or "unknown"
+    print(f"terminal: {terminal} (font: see docs/terminal-setup.md)")
 
     key_source = _api_key_source()
     print(f"api key: {key_source}")

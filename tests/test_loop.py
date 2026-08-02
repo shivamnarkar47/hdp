@@ -187,6 +187,32 @@ class TestAgentLoop(unittest.TestCase):
         content = "".join(e[1] for e in events if e[0] == "content")
         self.assertNotIn("think", content)
 
+    def test_agent_persona_injected_into_system_prompt(self):
+        """With an agent persona, the turn-1 wire system message names it."""
+        gateway = FakeGateway([("content", "ok"), ("done", "stop")])
+        loop = AgentLoop(
+            gateway,
+            self.tools,
+            self.memory,
+            self.session_id,
+            agent={"name": "Arjuna", "description": "precise"},
+        )
+        loop.run("hi")
+        wire = gateway.calls[0][0]
+        system = next(m for m in wire if m["role"] == "system")
+        self.assertIn("Arjuna", system["content"])
+        self.assertIn("precise", system["content"])
+
+    def test_no_agent_no_persona(self):
+        """Without an agent, the system prompt carries no persona block."""
+        gateway = FakeGateway([("content", "ok"), ("done", "stop")])
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
+        loop.run("hi")
+        wire = gateway.calls[0][0]
+        system = next(m for m in wire if m["role"] == "system")
+        self.assertNotIn("Arjuna", system["content"])
+        self.assertNotIn("## Agent", system["content"])
+
     def test_tool_loop_abort(self):
         script = [("content", DSML_WRITE), ("done", "tool_calls")]
         gateway = FakeGateway(script, script, script)

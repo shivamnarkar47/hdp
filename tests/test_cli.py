@@ -223,6 +223,42 @@ class TestCli(unittest.TestCase):
         self.assertIsInstance(captured["tools"]._cache, ToolCache)
         self.assertFalse(captured["enable_verify"])
 
+    # -- run --agent ---------------------------------------------------------
+
+    def test_run_agent_flag_reaches_loop(self):
+        """--agent Arjuna resolves from the seeded defaults and reaches the
+        constructed AgentLoop as the persona dict."""
+        captured = {}
+
+        class FakeAgentLoop:
+            def __init__(self, *args, **kwargs):
+                captured["agent"] = kwargs.get("agent")
+
+            def run(self, task, emit=None):
+                return "ok"
+
+        gateway = FakeGateway([("content", "hi"), ("done", "stop")])
+        with mock.patch("harness.cli.Gateway", return_value=gateway), mock.patch(
+            "harness.cli.AgentLoop", FakeAgentLoop
+        ):
+            code, out, _ = self._run_cli(
+                ["run", "hi", "--agent", "Arjuna", "--dir", str(self.tempdir)]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(captured["agent"]["name"], "Arjuna")
+
+    def test_run_agent_unknown_errors_exit_1(self):
+        """--agent with a name not in the agents file errors and exits 1."""
+        gateway = FakeGateway([("content", "hi"), ("done", "stop")])
+        with mock.patch("harness.cli.Gateway", return_value=gateway):
+            code, _, err = self._run_cli(
+                ["run", "hi", "--agent", "Bogus", "--dir", str(self.tempdir)]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("hdp: no such agent: Bogus", err)
+        # The error short-circuits before any gateway stream.
+        self.assertEqual(gateway.calls, [])
+
     # -- run batch -----------------------------------------------------------
 
     def test_run_batch_two_prompts_json_array(self):
