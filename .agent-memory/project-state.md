@@ -18,3 +18,21 @@ Added docs/architecture.md with two mermaid diagrams: (1) module architecture + 
 
 ## 2026-08-02 20:25
 session: Create a mermaid diagram of it and store in docs. → ok
+
+## 2026-08-02 20:40
+session: Hello → ok
+
+## 2026-08-02 20:41
+session: Ok, give me a brief about what does loop and dialect do. → ok
+
+## 2026-08-02 20:42
+session: It stucked on half. → ok
+
+## 2026-08-02 20:42
+session: Again stucked → ok
+
+## 2026-08-02 20:43
+session: How good is this compared to Oh-my-pi ? → ok
+
+## 2026-08-02 20:46
+session: Who is Prime Minister of India → ok
