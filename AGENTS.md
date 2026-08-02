@@ -103,7 +103,7 @@
 | File | Purpose | Open when… |
 |---|---|---|
 | `harness/cli.py` | Entry point: subcommands, flags, exit codes | tracing a command or exit code |
-| `harness/tui.py` | Textual app; slash commands; worker thread | working on the UI |
+| `harness/tui.py` | Textual split-pane app: conversation pane + Trace/Memory/Sessions sidebar + status bar; slash commands; worker thread | working on the UI |
 | `harness/loop.py` | `AgentLoop`: stream→heal→execute→persist; `AgentEvent` seam | tracing agent behavior end-to-end |
 | `harness/gateway.py` | SSE client; wire body/headers; retries; port-boundary file | touching the wire protocol |
 | `harness/dialect.py` | DSML state machine + leaked-token stripper | healing bugs — every agent touches this eventually |
@@ -141,7 +141,7 @@
 - **PITFALL: call `DialectFeed.flush()` at end of stream** (the loop does); unclosed sections are deliberately discarded there, not raised.
 - **PITFALL: structured beats healed.** `calls = structured_calls if structured_calls else healed_calls` in `loop.py` — don't "fix" that precedence.
 - **PITFALL: tool results are strings.** 10k-char cap; `bash` timeout 30s default / 300s max; `grep` is case-insensitive unless `case:true`; `read` `offset` is 1-based.
-- **PITFALL: TUI thread rules.** The loop runs on a worker thread; that thread never touches widgets — events marshal via `call_from_thread`. Keep it that way.
+- **PITFALL: TUI thread rules.** The loop runs on a worker thread; that thread never touches widgets — events marshal via `call_from_thread`. Keep it that way. Streaming markdown re-renders the whole document per update, so the TUI accumulates chunks and flushes at most every ~100 ms (timer owned by the main thread); don't update the `Markdown` widget from the emit callback directly.
 - **PITFALL: don't name an attribute `_loop` on the App** — Textual's `App._loop` is internal (`tui.py` comment; the field is `_agent_loop`).
 
 ## 6. Memory

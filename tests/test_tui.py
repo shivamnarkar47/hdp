@@ -2,7 +2,8 @@
 
 Drives the real TUI through ``run_test``: a typed prompt is submitted, the
 agent loop runs on its worker thread against a scripted fake gateway, and the
-tool it calls (`write`) actually executes against a temp project dir.
+tool it calls (`write`) actually executes against a temp project dir. The
+prompt is the multi-line TextArea; Enter submits it.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from textual.widgets import Input
+from textual.widgets import TextArea
 
 from harness.tui import HarnessTui
 
@@ -75,7 +76,9 @@ class TestTui(unittest.TestCase):
 
     @staticmethod
     async def _submit_and_wait(app: HarnessTui, prompt: str, pilot) -> None:
-        app.query_one("#prompt", Input).value = prompt
+        prompt_widget = app.query_one("#prompt", TextArea)
+        prompt_widget.text = prompt
+        prompt_widget.focus()
         await pilot.pause()
         await pilot.press("enter")
         for _ in range(200):  # up to ~10s
@@ -90,9 +93,9 @@ class TestTui(unittest.TestCase):
             async with app.run_test() as pilot:
                 await self._submit_and_wait(app, "write hello.txt", pilot)
                 self.assertFalse(app.turn_active)
-                output = "".join(app.output_lines)
-                self.assertIn("Wrote hello.txt.", output)
-                self.assertTrue(any(line.startswith("⚙") for line in app.output_lines))
+                transcript = "".join(app.transcript)
+                self.assertIn("Wrote hello.txt.", transcript)
+                self.assertTrue(any(line.startswith("⚙") for line in app.transcript))
                 self.assertEqual((self.root / "hello.txt").read_text(encoding="utf-8"), "hi")
 
         asyncio.run(flow())
@@ -103,15 +106,15 @@ class TestTui(unittest.TestCase):
             async with app.run_test() as pilot:
                 await self._submit_and_wait(app, "write hello.txt", pilot)
                 sid = app.session_id
-                app.query_one("#prompt", Input).value = "/sessions"
+                app.query_one("#prompt", TextArea).text = "/sessions"
                 await pilot.pause()
                 await pilot.press("enter")
                 for _ in range(200):  # up to ~10s
-                    if sid in "".join(app.output_lines):
+                    if sid in "".join(app.transcript):
                         break
                     await pilot.pause(0.05)
-                self.assertIn(sid, "".join(app.output_lines))
-                self.assertIn("write hello.txt", "".join(app.output_lines))
+                self.assertIn(sid, "".join(app.transcript))
+                self.assertIn("write hello.txt", "".join(app.transcript))
 
         asyncio.run(flow())
 

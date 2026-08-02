@@ -39,8 +39,8 @@ class LoopError(Exception):
 # Events emitted to the front end synchronously as they happen:
 #   ("content", str) | ("reasoning", str) | ("tool_start", ToolCall)
 #   | ("tool_result", tool_call_id: str, content: str)
-#   | ("done", answer: str) | ("error", str)
-AgentEvent = tuple[str, str | ToolCall] | tuple[str, str, str]
+#   | ("step", int) | ("done", answer: str) | ("error", str)
+AgentEvent = tuple[str, str | ToolCall | int] | tuple[str, str, str]
 
 # Events the gateway yields on its stream:
 #   ("content", str) | ("reasoning", str) | ("tool_call", ToolCall)
@@ -166,6 +166,8 @@ class AgentLoop:
         the turn inside this step and must not count as a new step.
         """
         self.steps += 1
+        if emit is not None:
+            emit(("step", self.steps))
         retried = False
         while True:  # overflow retry re-runs the turn without consuming a step
             content_parts: list[str] = []

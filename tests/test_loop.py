@@ -100,8 +100,8 @@ class TestAgentLoop(unittest.TestCase):
         self.assertNotIn("DSML", answer)
         self.assertNotIn(FW, answer)
 
-        # Ordered emit sequence (reasoning events filtered out).
-        filtered = [e for e in events if e[0] != "reasoning"]
+        # Ordered emit sequence (reasoning and step events filtered out).
+        filtered = [e for e in events if e[0] not in ("reasoning", "step")]
         self.assertEqual(
             [e[0] for e in filtered],
             ["content", "tool_start", "tool_result", "content", "done"],

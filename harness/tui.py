@@ -1,14 +1,19 @@
-"""Textual full-pane TUI — the default hdp surface.
+"""Textual split-pane TUI — the default hdp surface.
 
-A chat interface over :class:`harness.loop.AgentLoop`: prompts go in at the
-bottom, the agent's streamed answer renders live in the main pane, and tool
-calls / results appear as dimmed trace lines. Slash commands manage sessions
-and memory; Ctrl+C cancels the running turn cooperatively.
+A polished agent client over :class:`harness.loop.AgentLoop`: a conversation
+pane (user blocks, streamed-markdown assistant turns, reasoning, collapsed
+tool boxes) on the left, a fixed sidebar (Trace / Memory / Sessions tabs) on
+the right, a multi-line prompt, and a one-line live status bar.
 
 The heavy loop runs in a worker *thread* so streaming never blocks the UI.
 Thread widgets are untouchable, so the thread's emit callback marshals every
 event back to the main thread via ``App.call_from_thread``; the main-thread
 handler is the only place that writes to widgets.
+
+Streaming markdown is throttled: Textual's ``Markdown`` re-renders its whole
+document on every update, so content chunks accumulate in a pending buffer and
+are flushed at most once per ~100 ms (and always on turn end). A single turn's
+markdown is capped; past the cap the overflow appends as a plain text block.
 """
 
 from __future__ import annotations
@@ -16,79 +21,270 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
+from textual.widgets import (
+    Button,
+    Header,
+    Markdown,
+    Static,
+    TabbedContent,
+    TabPane,
+    TextArea,
+)
 
 from harness import config, sessions
 from harness.gateway import Gateway
-from harness.loop import AgentEvent, AgentLoop
+from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
 from harness.tools import ToolRegistry
+
+# Streaming markdown is re-rendered whole-document per update; flush at most
+# every ~100 ms and cap one turn's markdown so a pathological turn can't jank
+# the UI or blow up the widget.
+MD_FLUSH_SECONDS = 0.1
+MD_CHAR_CAP = 200_000
+
+# Result previews shown in collapsed tool boxes / the trace tab.
+PREVIEW_CHARS = 200
+
+# Content starting with any of these counts as a failed tool result.
+_ERROR_STARTS = (
+    "blocked",
+    "error",
+    "failed",
+    "invalid",
+    "missing",
+    "no such",
+    "not found",
+    "unknown tool",
+    "denied",
+)
 
 
 class TurnCancelled(Exception):
     """Raised by the emit callback when the user cancels the active turn."""
 
 
-class HistoryInput(Input):
-    """Prompt input that walks submitted-prompt history with up/down arrows.
+class PromptSubmitted(Message):
+    """The prompt was submitted (Enter pressed with non-empty content)."""
 
-    Textual routes key events through :meth:`handle_key`; pressing up shows
-    the previous prompt (starting at the newest), down walks back toward the
-    newest and eventually back to an empty buffer.
+    def __init__(self, text: str) -> None:
+        self.text = text
+        super().__init__()
+
+
+class PromptInput(TextArea):
+    """Multi-line prompt: Enter submits, Shift+Enter inserts a newline.
+
+    TextArea's default up/down move the caret, so history recall lives on
+    Ctrl+P (previous) / Ctrl+N (next), matching readline. Ctrl+C is rebound
+    from TextArea's copy to cancel the active turn (the terminal's
+    Ctrl+Shift+C still copies).
     """
 
-    def handle_key(self, event: events.Key) -> bool:
+    BINDINGS = [
+        # priority=True so Enter is checked in the App's priority pass before
+        # TextArea._on_key can consume it as a newline insert.
+        Binding("enter", "submit", "Send", priority=True, show=False),
+        Binding("shift+enter", "newline", "New line", show=False),
+        Binding("ctrl+p", "history_prev", "History previous", show=False),
+        Binding("ctrl+n", "history_next", "History next", show=False),
+        Binding("ctrl+c", "cancel", "Cancel turn", show=False),
+    ]
+
+    def action_submit(self) -> None:
+        text = self.text.rstrip("\n")
+        self.text = ""
+        if text.strip():
+            self.post_message(PromptSubmitted(text))
+
+    def action_newline(self) -> None:
+        self.insert("\n")
+
+    def action_history_prev(self) -> None:
         app = self.app
         history: list[str] = app.prompt_history
-        if event.key == "up":
-            if not history:
-                return super().handle_key(event)
-            if app._history_index is None:
-                app._history_index = len(history) - 1
-            elif app._history_index > 0:
-                app._history_index -= 1
-            else:
-                return True  # already at the oldest entry; consume the key
-            self.value = history[app._history_index]
-            self.cursor_position = len(self.value)
-            return True
-        if event.key == "down":
-            if app._history_index is None:
-                return super().handle_key(event)
-            app._history_index += 1
-            if app._history_index >= len(history):
-                app._history_index = None
-                self.value = ""
-            else:
-                self.value = history[app._history_index]
-            self.cursor_position = len(self.value)
-            return True
-        return super().handle_key(event)
+        if not history:
+            return
+        if app._history_index is None:
+            app._history_index = len(history) - 1
+        elif app._history_index > 0:
+            app._history_index -= 1
+        else:
+            return  # already at the oldest entry
+        self.text = history[app._history_index]
+        self.move_cursor(self.document.end)
+
+    def action_history_next(self) -> None:
+        app = self.app
+        if app._history_index is None:
+            return
+        app._history_index += 1
+        if app._history_index >= len(app.prompt_history):
+            app._history_index = None
+            self.text = ""
+        else:
+            self.text = app.prompt_history[app._history_index]
+        self.move_cursor(self.document.end)
+
+    def action_cancel(self) -> None:
+        self.app.action_cancel_turn()
+
+
+class ConversationScroll(VerticalScroll):
+    """Conversation pane; reports user scrolling so auto-follow can pause.
+
+    The app only auto-scrolls on new content while the user is following the
+    bottom; scrolling up (wheel or keys) stops the follow until the user
+    scrolls back to the bottom or presses Ctrl+L.
+    """
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.app.set_follow_scroll(False)
+        super()._on_mouse_scroll_up(event)
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.app.maybe_resume_follow()
+        super()._on_mouse_scroll_down(event)
+
+    def action_scroll_up(self) -> None:
+        self.app.set_follow_scroll(False)
+        super().action_scroll_up()
+
+    def action_scroll_home(self) -> None:
+        self.app.set_follow_scroll(False)
+        super().action_scroll_home()
+
+    def action_scroll_down(self) -> None:
+        self.app.maybe_resume_follow()
+        super().action_scroll_down()
+
+    def action_scroll_end(self) -> None:
+        self.app.maybe_resume_follow()
+        super().action_scroll_end()
 
 
 class HarnessTui(App):
-    """Full-pane chat TUI for hdp."""
+    """Split-pane chat TUI for hdp."""
 
     TITLE = "hdp"
 
     CSS = """
-    #output {
-        height: 1fr;
-        width: 1fr;
+    Screen {
+        background: $surface;
     }
-    #prompt {
+
+    #conversation {
+        width: 2fr;
+        height: 1fr;
+        background: $background;
+        padding: 0 1 0 1;
+    }
+
+    #sidebar {
+        width: 34;
+        height: 1fr;
+        background: $panel;
+        border-left: solid $panel-lighten-1;
+    }
+
+    #sidebar TabbedContent {
+        height: 1fr;
+    }
+
+    #sidebar TabPane {
+        height: 1fr;
+    }
+
+    #bottom {
         dock: bottom;
+        height: auto;
+    }
+
+    #prompt {
         height: 3;
+        margin: 0 1 0 1;
+    }
+
+    #status {
+        height: 1;
+        color: $text-muted;
+    }
+
+    .welcome {
+        color: $text-muted;
+        margin: 1 0 1 0;
+    }
+
+    .user-block {
+        border: round $accent;
+        padding: 0 1;
+        margin: 1 0 1 0;
+    }
+
+    .assistant-label {
+        color: $accent;
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    .assistant-md {
+        margin: 0 0 1 0;
+    }
+
+    .reasoning {
+        color: $text-muted;
+        text-style: dim;
+        margin: 0 0 1 0;
+    }
+
+    .tool-box {
+        border: round $surface-lighten-1;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        color: $text-muted;
+    }
+
+    .turn-raw {
+        margin: 0 0 1 0;
+    }
+
+    .error-box {
+        border: round $error;
+        padding: 0 1;
+        margin: 1 0 1 0;
+    }
+
+    .notice {
+        color: $text-muted;
+        margin: 0 0 1 0;
+    }
+
+    .trace-line {
+        color: $text-muted;
+        padding: 0 0 0 1;
+    }
+
+    .sidebar-empty {
+        color: $text-muted;
+        padding: 1;
+    }
+
+    .session-btn {
+        width: 100%;
+        max-width: 100%;
+        margin: 0 0 0 0;
     }
     """
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_turn", "Cancel"),
         Binding("ctrl+q", "quit", "Quit"),
+        Binding("ctrl+l", "jump_to_bottom", "Jump to bottom", show=False),
     ]
 
     def __init__(
@@ -125,36 +321,80 @@ class HarnessTui(App):
         self.verbose = False
         self.prompt_history: list[str] = []
         self._history_index: int | None = None
-        self.output_lines: list[str] = []
+        # Plain-text mirror of everything rendered, in order (used by tests).
+        self.transcript: list[str] = []
         # NB: do NOT use the name `_loop` here — App._loop is Textual's
         # internal asyncio event loop that call_from_thread() relies on.
         self._agent_loop: AgentLoop | None = None
         self._current_task: str | None = None
-        self._prompt_input: HistoryInput | None = None
-        self._output: RichLog | None = None
+
+        self._prompt_input: PromptInput | None = None
+        self._conversation: ConversationScroll | None = None
+        self._trace: VerticalScroll | None = None
+        self._tool_count = len(self.tools.schemas())
+        self._steps = 0
+
+        # Auto-follow state for the conversation pane.
+        self._follow = True
+        # Per-turn streaming state.
+        self._turn_md: Markdown | None = None
+        self._turn_raw: Static | None = None
+        self._turn_raw_text = ""
+        self._turn_md_text = ""
+        self._md_over_cap = False
+        self._md_pending: list[str] = []
+        self._md_timer: Any = None
+        self._reasoning: Static | None = None
+        self._reasoning_text = ""
+        # call_id -> (conversation box, trace line, name, arguments)
+        self._tool_boxes: dict[str, tuple[Static, Static, str, str]] = {}
 
     # -- widgets ------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield RichLog(id="output", markup=False, wrap=True)
-        yield HistoryInput(id="prompt", placeholder="Ask hdp… (/help)")
-        yield Footer()
+        with Horizontal(id="main"):
+            with ConversationScroll(id="conversation"):
+                pass
+            with Vertical(id="sidebar"):
+                with TabbedContent(initial="pane-trace"):
+                    with TabPane("Trace", id="pane-trace"):
+                        yield VerticalScroll(id="trace")
+                    with TabPane("Memory", id="pane-memory"):
+                        with VerticalScroll(id="memory-pane"):
+                            yield Static(id="memory-view")
+                    with TabPane("Sessions", id="pane-sessions"):
+                        with VerticalScroll(id="sessions-view"):
+                            pass
+        with Vertical(id="bottom"):
+            yield PromptInput(
+                id="prompt",
+                placeholder="Ask hdp… (/help)",
+                soft_wrap=True,
+            )
+            yield Static(id="status")
 
     def on_mount(self) -> None:
-        self._output = self.query_one("#output", RichLog)
-        self._prompt_input = self.query_one("#prompt", HistoryInput)
+        self._conversation = self.query_one("#conversation", ConversationScroll)
+        self._trace = self.query_one("#trace", VerticalScroll)
+        self._prompt_input = self.query_one("#prompt", PromptInput)
+        self._write_line(
+            f"hdp — {self.model_id} agent. Ask a task, or /help for commands.",
+            classes="welcome",
+        )
+        self._refresh_memory()
+        self._refresh_sessions()
+        self._render_status()
         self._prompt_input.focus()
 
     # -- input --------------------------------------------------------------
 
-    @on(Input.Submitted)
-    def _on_submitted(self, event: Input.Submitted) -> None:
+    @on(PromptSubmitted)
+    def _on_prompt_submitted(self, event: PromptSubmitted) -> None:
         if self.turn_active:
-            self._write_line("(busy — Ctrl+C cancels the current turn)", style="dim")
+            self._write_line("(busy — Ctrl+C cancels the current turn)", classes="notice")
             return
-        text = event.value.strip()
-        self._prompt_input.value = ""
+        text = event.text.strip()
         if not text:
             return
         self.prompt_history.append(text)
@@ -165,7 +405,8 @@ class HarnessTui(App):
             self._start_turn(text)
 
     def _start_turn(self, task: str) -> None:
-        """Build a fresh one-shot loop and run it on a worker thread."""
+        """Render the user block, build a fresh one-shot loop, run it."""
+        self._render_user_block(task)
         loop = AgentLoop(
             self.gateway,
             self.tools,
@@ -179,7 +420,9 @@ class HarnessTui(App):
         self._current_task = task
         self._cancel_turn = False
         self.turn_active = True
+        self._reset_turn_stream()
         self._prompt_input.disabled = True
+        self._render_status()
         self.run_worker(self._thread_run, thread=True, group="agent")
 
     def _thread_run(self, task: str | None = None) -> None:
@@ -209,57 +452,234 @@ class HarnessTui(App):
 
     def _on_loop_event(self, event: AgentEvent) -> None:
         kind = event[0]
-        if kind == "content":
-            self._write(event[1])  # type: ignore[arg-type]
+        if kind == "step":
+            self._steps = int(event[1])
+            if self._steps > 1:
+                # A new model generation started: flush the previous one's
+                # streaming markdown and open a fresh block, so tool boxes
+                # interleave between generations instead of stacking after.
+                self._flush_md()
+                self._reset_turn_stream()
+            self._render_status()
+        elif kind == "content":
+            self._ensure_assistant()
+            self._append_content(event[1])  # type: ignore[arg-type]
         elif kind == "reasoning":
             if self.verbose:
-                self._write_line(f"[think] {event[1]}", style="dim")
+                self._append_reasoning(event[1])  # type: ignore[arg-type]
         elif kind == "tool_start":
-            call = event[1]
-            self._write_line(f"⚙ {call.name}({call.arguments})", style="dim")
+            self._on_tool_start(event[1])  # type: ignore[arg-type]
         elif kind == "tool_result":
-            _, _call_id, content = event
-            collapsed = content[:200] + ("…" if len(content) > 200 else "")
-            self._write_line(f"  → {collapsed}", style="dim")
+            _, call_id, content = event
+            self._on_tool_result(call_id, content)
         elif kind == "error":
-            self._write_line(f"error: {event[1]}", style="red")
+            self._write_line(f"error: {event[1]}", classes="error-box")
+            self._flush_md()
             self.turn_finished()
         elif kind == "done":
+            self._flush_md()
             self.turn_finished()
 
     def _on_loop_error(self, message: str) -> None:
         # The ("error", ...) event already rendered this and finished the turn.
         if not self.turn_active:
             return
-        self._write_line(f"error: {message}", style="red")
+        self._write_line(f"error: {message}", classes="error-box")
         self.turn_finished()
 
-    def _write(self, text: str) -> None:
-        self.output_lines.append(text)
-        self._output.write(text)
+    def _reset_turn_stream(self) -> None:
+        self._turn_md = None
+        self._turn_raw = None
+        self._turn_raw_text = ""
+        self._turn_md_text = ""
+        self._md_over_cap = False
+        self._md_pending = []
+        self._md_timer = None
+        self._reasoning = None
+        self._reasoning_text = ""
+        self._tool_boxes = {}
 
-    def _write_line(self, text: str, style: str | None = None) -> None:
-        self.output_lines.append(text)
-        if style:
-            self._output.write(Text(text, style=style))
+    def _ensure_assistant(self) -> None:
+        """Mount the '▌ hdp' label + the turn's streaming Markdown widget."""
+        if self._turn_md is not None:
+            return
+        self.transcript.append("▌ hdp")
+        self._conversation.mount(Static("▌ hdp", classes="assistant-label", markup=False))
+        self._turn_md = Markdown("", classes="assistant-md")
+        self._conversation.mount(self._turn_md)
+        self._scroll_follow()
+
+    def _append_content(self, chunk: str) -> None:
+        self.transcript.append(chunk)
+        self._md_pending.append(chunk)
+        if self._md_timer is None:
+            self._md_timer = self.set_timer(MD_FLUSH_SECONDS, self._flush_md)
+
+    def _flush_md(self) -> None:
+        """Throttled markdown re-render; also the turn-end flush."""
+        if self._md_timer is not None:
+            self._md_timer.stop()
+        self._md_timer = None
+        if not self._md_pending:
+            return
+        chunk = "".join(self._md_pending)
+        self._md_pending.clear()
+        if self._turn_md is None:
+            return
+        if not self._md_over_cap:
+            room = MD_CHAR_CAP - len(self._turn_md_text)
+            if len(chunk) <= room:
+                self._turn_md_text += chunk
+                self._turn_md.update(self._turn_md_text)
+            else:
+                self._turn_md_text += chunk[:room]
+                self._turn_md.update(self._turn_md_text)
+                self._md_over_cap = True
+                self._turn_raw = Static(chunk[room:], classes="turn-raw", markup=False)
+                self._turn_raw_text = chunk[room:]
+                self._conversation.mount(self._turn_raw, after=self._turn_md)
         else:
-            self._output.write(text)
+            self._turn_raw_text += chunk
+            self._turn_raw.update(self._turn_raw_text)
+        self._scroll_follow()
+
+    def _append_reasoning(self, chunk: str) -> None:
+        self.transcript.append(f"💭 {chunk}")
+        self._reasoning_text += chunk
+        if self._reasoning is None:
+            self._reasoning = Static("", classes="reasoning", markup=False)
+            self._conversation.mount(self._reasoning)
+        self._reasoning.update(f"💭 {self._reasoning_text}")
+        self._scroll_follow()
+
+    def _on_tool_start(self, call: ToolCall) -> None:
+        self.transcript.append(f"⚙ {call.name}({call.arguments})")
+        box = Static(f"⚙ {call.name}({call.arguments})", classes="tool-box", markup=False)
+        self._conversation.mount(box)
+        trace = Static(f"⚙ {call.name}({call.arguments})", classes="trace-line", markup=False)
+        self._trace.mount(trace)
+        self._trace.scroll_end(animate=False)
+        self._tool_boxes[call.id] = (box, trace, call.name, call.arguments)
+        self._scroll_follow()
+
+    def _on_tool_result(self, call_id: str, content: str) -> None:
+        preview = content[:PREVIEW_CHARS] + ("…" if len(content) > PREVIEW_CHARS else "")
+        glyph = "✓" if self._looks_ok(content) else "⚠"
+        self.transcript.append(f"  {glyph} {preview}")
+        entry = self._tool_boxes.pop(call_id, None)
+        if entry is not None:
+            box, trace, name, args = entry
+            box.update(f"⚙ {name}({args})\n{glyph} {preview}")
+            trace.update(f"{glyph} ⚙ {name}({args}) → {preview}")
+
+    @staticmethod
+    def _looks_ok(content: str) -> bool:
+        low = content.strip().lower()
+        return not any(low.startswith(hint) for hint in _ERROR_STARTS)
+
+    # -- conversation helpers -----------------------------------------------
+
+    def _render_user_block(self, text: str) -> None:
+        self.transcript.append(f"▌ you\n{text}")
+        self._conversation.mount(Static(f"▌ you\n{text}", classes="user-block", markup=False))
+        self._scroll_follow()
+
+    def _write_line(self, text: str, classes: str = "") -> None:
+        self.transcript.append(text)
+        self._conversation.mount(Static(text, classes=classes, markup=False))
+        self._scroll_follow()
+
+    def set_follow_scroll(self, follow: bool) -> None:
+        self._follow = follow
+
+    def maybe_resume_follow(self) -> None:
+        conv = self._conversation
+        if conv.max_scroll_y is None or conv.scroll_y >= conv.max_scroll_y - 1:
+            self._follow = True
+
+    def _scroll_follow(self) -> None:
+        if self._follow and self._conversation is not None:
+            self._conversation.scroll_end(animate=False)
+            # Widget heights (markdown, boxes) land on the next layout pass,
+            # so the computed bottom is stale; re-assert it once layout settles.
+            self.set_timer(0.05, self._scroll_follow_settled)
+
+    def _scroll_follow_settled(self) -> None:
+        if self._follow and self._conversation is not None:
+            self._conversation.scroll_end(animate=False)
+
+    # -- sidebar ------------------------------------------------------------
+
+    def _refresh_memory(self) -> None:
+        lines = [str(self.memory.file_path(section)) for section in SECTIONS]
+        digest = self.memory.load_digest()
+        if digest:
+            lines.append("")
+            lines.extend(digest.splitlines())
+        if len(lines) > 24:
+            lines = lines[:24]
+            lines.append("…")
+        self.query_one("#memory-view", Static).update("\n".join(lines))
+
+    def _refresh_sessions(self) -> None:
+        view = self.query_one("#sessions-view", VerticalScroll)
+        view.remove_children()
+        entries = sessions.list_sessions()
+        if not entries:
+            view.mount(Static("(no sessions yet)", classes="sidebar-empty", markup=False))
+            return
+        for entry in entries:
+            sid = entry["id"]
+            label = f"{sid}  {(entry['prompt'] or '')[:50]}"
+            view.mount(
+                Button(label, classes="session-btn", action=f"resume_session({sid!r})")
+            )
+
+    def action_resume_session(self, sid: str) -> None:
+        """Resume a session from a sidebar Sessions row click."""
+        if self.turn_active:
+            self._write_line("(busy — finish or cancel the current turn first)", classes="notice")
+            return
+        self.session_id = sid
+        self.resume_next = True
+        self.sub_title = f"{self.model_id} · {self.session_id}"
+        self._write_line(f"resuming {sid}")
+        self._render_status()
+
+    # -- status bar ---------------------------------------------------------
+
+    def _render_status(self) -> None:
+        verbose = "verbose on" if self.verbose else "verbose off"
+        self.query_one("#status", Static).update(
+            f"{self.model_id} · {self.session_id} · step {self._steps}/{self.max_steps} · "
+            f"{self._tool_count} tools · {verbose} · Ctrl+C cancel"
+        )
+
+    # -- turn lifecycle -----------------------------------------------------
 
     def turn_finished(self) -> None:
-        self._prompt_input.disabled = False
-        self._prompt_input.focus()
+        self._flush_md()
         self.turn_active = False
         self.resume_next = True
+        self._prompt_input.disabled = False
+        self._prompt_input.focus()
+        self._refresh_memory()
+        self._refresh_sessions()
+        self._render_status()
 
     # -- actions ------------------------------------------------------------
 
     def action_cancel_turn(self) -> None:
         if self.turn_active:
             self._cancel_turn = True
-            self._write_line("canceled", style="dim")
+            self._write_line("canceled", classes="notice")
             self.turn_finished()  # the thread aborts on its next emit
         else:
-            self._write_line("nothing to cancel", style="dim")
+            self._write_line("nothing to cancel", classes="notice")
+
+    def action_jump_to_bottom(self) -> None:
+        self._follow = True
+        self._conversation.scroll_end(animate=False)
 
     # -- slash commands -----------------------------------------------------
 
@@ -273,21 +693,27 @@ class HarnessTui(App):
             self.session_id = sessions.new_session_id()
             self.resume_next = False
             self.sub_title = f"{self.model_id} · {self.session_id}"
-            self._output.clear()
-            self.output_lines.clear()
+            self._conversation.remove_children()
+            self.transcript.clear()
+            self._follow = True
+            self._refresh_sessions()
+            self._render_status()
         elif cmd == "/resume":
             if not arg:
-                self._write_line("usage: /resume <session-id>", style="dim")
+                self._write_line("usage: /resume <session-id>", classes="notice")
                 return
             self.session_id = arg
             self.resume_next = True
             self.sub_title = f"{self.model_id} · {self.session_id}"
             self._write_line(f"resuming {arg}")
+            self._refresh_sessions()
+            self._render_status()
         elif cmd == "/sessions":
             for entry in sessions.list_sessions():
                 self._write_line(
                     f"{entry['id']}  {entry['ts'] or '-'}  {(entry['prompt'] or '')[:60]}"
                 )
+            self._refresh_sessions()
         elif cmd == "/memory":
             digest = self.memory.load_digest()
             if digest:
@@ -296,11 +722,13 @@ class HarnessTui(App):
                 self._write_line("(memory empty)")
             for section in SECTIONS:
                 self._write_line(str(self.memory.file_path(section)))
+            self._refresh_memory()
         elif cmd == "/model":
             self._write_line(self.model_id)
         elif cmd == "/verbose":
             self.verbose = not self.verbose
             self._write_line(f"verbose {'on' if self.verbose else 'off'}")
+            self._render_status()
         elif cmd == "/quit":
             self.exit()
         else:
@@ -309,6 +737,10 @@ class HarnessTui(App):
     def _help(self) -> None:
         self._write_line(
             "commands: /help /new /resume <id> /sessions /memory /model /verbose /quit"
+        )
+        self._write_line(
+            "keys: enter send · shift+enter newline · ctrl+p/n history · "
+            "ctrl+l bottom · ctrl+c cancel · ctrl+q quit"
         )
 
 
