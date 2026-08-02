@@ -49,19 +49,12 @@ from textual.widgets import (
 )
 
 from harness import agents, config, sessions
-from harness.art import BANNER_TAGLINE, BANNER_TITLE
+from harness.art import BANNER_TAGLINE, BANNER_TITLE, CHARIOT_WHEEL
 from harness.gateway import Gateway, GatewayError
 from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
 from harness.structure import StructureManager
 from harness.tools import ToolRegistry
-
-# Home-screen hero image: the Mahabharata poster at the repo root. Both the
-# dev venv and the installer's cloned tree keep the full repo layout, so
-# resolve relative to this file (harness/ -> repo root). The image is shown
-# only when `textual-image` is installed and the file decodes; otherwise
-# _render_home falls back to the text-only banner.
-HOME_IMAGE = Path(__file__).resolve().parents[1] / "images" / "mahabharata.jpeg"
 
 # Streaming markdown is re-rendered whole-document per update; flush at most
 # every ~100 ms (slower for big docs) and cap one turn's markdown so a
@@ -1349,42 +1342,21 @@ class HarnessTui(App):
 
     # -- conversation helpers -----------------------------------------------
 
-    def _mount_home_image(self) -> None:
-        """Mount the home-screen hero image above the banner (best effort).
-
-        Uses ``textual_image``'s Image widget, which renders via the terminal
-        image protocol (kitty TGP in a real terminal, unicode fallback
-        headless). Width is constrained to ~60 columns and the widget scales
-        the height to preserve the image's aspect ratio. Missing or
-        undecodable image, or no ``textual-image`` installed -> the text-only
-        banner renders instead. The image is never mirrored into the
-        transcript: it isn't text, and the title/tagline/welcome still are.
-        """
-        try:
-            from textual_image.widget import Image
-
-            image = Image(image=HOME_IMAGE)
-            image.styles.width = 60
-            image.styles.height = "auto"
-            self._conversation.mount(image)
-        except (ImportError, OSError, ValueError):
-            pass  # no image backend / missing or undecodable image: banner only
-
     def _render_home(self) -> None:
-        """Render the KESHAVLOK banner + welcome line (startup and `/new`).
+        """Render the chariot wheel + KESHAVLOK banner (startup and `/new`).
 
-        Clears the pane and live-stream state, then mounts the home image
-        (best effort) above the banner title (accent/bold) and tagline (dim)
-        as styled Statics, and mirrors every line plus the welcome line into
-        the transcript, in order. The image is not text, so it is never
-        mirrored into the transcript.
+        Clears the pane and live-stream state, then mounts Krishna's chariot
+        wheel (the KESHAVLOK symbol) as a plain Static, the banner title
+        (accent/bold) and tagline (dim), and the welcome line — mirroring
+        every line into the transcript in order.
         """
         self._conversation.remove_children()
         self.transcript.clear()
         self._follow = True
         self._reset_turn_stream()
         self._hide_thinking()
-        self._mount_home_image()
+        self.transcript.append(CHARIOT_WHEEL)
+        self._conversation.mount(Static(CHARIOT_WHEEL, classes="chariot-wheel", markup=False))
         self.transcript.append(BANNER_TITLE)
         self._conversation.mount(Static(BANNER_TITLE, classes="banner-title", markup=False))
         self.transcript.append(BANNER_TAGLINE)

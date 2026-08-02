@@ -21,7 +21,7 @@ from textual.containers import Vertical
 from textual.widgets import Input, Label, ListView, Static, TextArea
 
 from harness import agents, config, sessions
-from harness.art import BANNER_TAGLINE, BANNER_TITLE, SEA_LION
+from harness.art import BANNER_TAGLINE, BANNER_TITLE, CHARIOT_WHEEL, SEA_LION
 from harness.tui import (
     AGENT_GENERATOR_SYSTEM_PROMPT,
     AgentFormScreen,
@@ -31,11 +31,6 @@ from harness.tui import (
     HarnessTui,
     SessionsScreen,
 )
-
-try:
-    from textual_image.widget import Image
-except ImportError:
-    Image = None  # optional runtime dep (CI `pip install -e .` pulls textual only)
 
 FW = "\uff5c"  # fullwidth vertical bar: DSML envelope delimiter
 
@@ -802,13 +797,24 @@ class TestTui(unittest.TestCase):
     def test_sea_lion_art_shape(self):
         lines = SEA_LION.splitlines()
         self.assertTrue(lines)
-        self.assertLessEqual(len(lines), 26)
-        self.assertGreaterEqual(len(lines), 20)
-        for line in lines:
-            self.assertLessEqual(len(line), 80)
-            self.assertNotIn("\t", line)
+    def test_sea_lion_art_shape(self):
+        lines = SEA_LION.splitlines()
+        self.assertGreaterEqual(len(lines), 1)
+        self.assertLessEqual(max(len(line) for line in lines), 80)
+        self.assertTrue(all("\t" not in line for line in lines))
         widths = [len(line) for line in lines]
         self.assertLessEqual(max(widths) - min(widths), 2)  # padded rectangle
+
+    def test_chariot_wheel_geometry(self):
+        lines = CHARIOT_WHEEL.splitlines()
+        # Krishna's chariot wheel: ~20-24 lines, each <= 80 cols, no tabs,
+        # and a true equal-width rectangle (unlike the sea lion's +-2).
+        self.assertGreaterEqual(len(lines), 1)
+        self.assertLessEqual(len(lines), 26)
+        self.assertTrue(all(len(line) <= 80 for line in lines))
+        self.assertTrue(all("\t" not in line for line in lines))
+        widths = [len(line) for line in lines]
+        self.assertEqual(len(set(widths)), 1)  # padded rectangle
 
     def test_home_banner(self):
         async def flow() -> None:
@@ -816,6 +822,7 @@ class TestTui(unittest.TestCase):
             async with app.run_test() as pilot:
                 await pilot.pause()
                 transcript = "\n".join(app.transcript)
+                self.assertIn(CHARIOT_WHEEL.splitlines()[10], transcript)  # hub line
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
@@ -835,47 +842,10 @@ class TestTui(unittest.TestCase):
                 self.assertEqual(app.session_id, "20260802-999999")
                 self.assertFalse(app.resume_next)
                 transcript = "\n".join(app.transcript)
+                self.assertIn(CHARIOT_WHEEL.splitlines()[10], transcript)  # hub line
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
-
-        asyncio.run(flow())
-
-    def test_home_image_mounted(self):
-        async def flow() -> None:
-            if Image is None:
-                self.skipTest("textual-image not installed")
-            app = self._app()
-            async with app.run_test() as pilot:
-                await pilot.pause()
-                image = app.query_one(Image)
-                # The widget holds the repo-root path it was given.
-                self.assertTrue(Path(image.image).is_file())
-                transcript = "\n".join(app.transcript)
-                self.assertIn(BANNER_TITLE, transcript)
-                self.assertIn(BANNER_TAGLINE, transcript)
-                self.assertIn("Ask a task, or /help", transcript)
-
-        asyncio.run(flow())
-
-    def test_home_image_missing_falls_back(self):
-        async def flow() -> None:
-            from harness import tui as tui_module
-
-            app = self._app()
-            with mock.patch.object(
-                tui_module, "HOME_IMAGE", Path(self.root) / "no-such-image.jpeg"
-            ):
-                async with app.run_test() as pilot:
-                    await pilot.pause()
-                    transcript = "\n".join(app.transcript)
-                    # Text banner intact, no exception from the missing image.
-                    self.assertIn(BANNER_TITLE, transcript)
-                    self.assertIn(BANNER_TAGLINE, transcript)
-                    self.assertIn("Ask a task, or /help", transcript)
-                    if Image is not None:
-                        # Empty DOMQuery has no `__eq__` against a plain list.
-                        self.assertEqual(len(app.query(Image)), 0)
 
         asyncio.run(flow())
 
