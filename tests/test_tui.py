@@ -398,6 +398,87 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_glued_fence_auto_repairs(self):
+        """A closing ``` glued to a content line (the DSML-sample slip) no
+        longer dumps the whole tail into one code block: the glued close is
+        split onto its own line at turn end, the tail renders as real
+        markdown, and the transcript keeps the model's verbatim text."""
+        from markdown_it import MarkdownIt
+
+        answer = (
+            "Intro with **bold** prose.\n\n"
+            "```\n"
+            '<｜DSML｜invoke name="read"><｜DSML｜parameter name="path">foo.py```\n'
+            "\n"
+            "## The tail\n\n"
+            "Prose that must render as markdown, not code.\n"
+        )
+
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway([("content", answer), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "repro"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                md_text = app._turn_md_text
+                # The glued close was split: the envelope is a one-line code
+                # block and the tail is back to real markdown.
+                self.assertIn('path">foo.py\n```', md_text)
+                toks = MarkdownIt("commonmark").parse(md_text)
+                fences = [t for t in toks if t.type == "fence"]
+                self.assertEqual(len(fences), 1)
+                self.assertEqual(
+                    fences[0].content.rstrip("\n"),
+                    '<｜DSML｜invoke name="read"><｜DSML｜parameter name="path">foo.py',
+                )
+                self.assertTrue(any(t.type == "heading_open" for t in toks))
+                transcript = "".join(app.transcript)
+                # Verbatim mirror: tail present, and the repair's extra fence
+                # never leaks into the transcript (model wrote exactly 2 ```).
+                self.assertIn(answer[-30:], transcript)
+                self.assertEqual(transcript.count("```"), 2)
+
+        asyncio.run(flow())
+
+    def test_dangling_fence_auto_closes(self):
+        """An answer that simply ends with an unclosed ``` gets the closing
+        fence appended at turn end so the tail isn't swallowed as code."""
+        async def flow() -> None:
+            answer = "Intro **bold**.\n\n```"
+            app = HarnessTui(
+                gateway=FakeGateway([("content", answer), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "repro"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                # Balanced: the markdown widget now ends with a closing fence.
+                self.assertTrue(app._turn_md_text.endswith("\n```"))
+                # Transcript still mirrors the verbatim (unbalanced) answer.
+                self.assertTrue("".join(app.transcript).endswith("```"))
+
+        asyncio.run(flow())
+
     def test_tokens_per_sec_helper(self):
         self.assertEqual(HarnessTui._tokens_per_sec(300, 10), 10.0)
         self.assertEqual(HarnessTui._tokens_per_sec(0, 0), 0.0)

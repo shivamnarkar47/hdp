@@ -14,6 +14,9 @@ Streaming markdown is throttled: Textual's ``Markdown`` re-renders its whole
 document on every update, so content chunks accumulate in a pending buffer and
 are flushed at most once per ~100 ms (and always on turn end). A single turn's
 markdown is capped; past the cap the overflow appends as a plain text block.
+At turn end, a code fence the model left dangling (a closing ``` glued to a
+content line) is auto-closed so the tail of the answer isn't swallowed into
+one literal code block.
 """
 
 from __future__ import annotations
@@ -56,6 +59,49 @@ from harness.tools import ToolRegistry
 # overflow appends as a plain text block (~16-20 ms worst flush at 10k).
 MD_FLUSH_SECONDS = 0.1
 MD_CHAR_CAP = 10_000
+
+
+def _repair_dangling_fence(text: str) -> str:
+    """Fix a code fence the model left dangling (render-side repair).
+
+    CommonMark only honors a closing fence at the start of a line (≤3-space
+    indent, backtick run ≥ the opener, then whitespace only). Two model slips
+    leave a fence open and dump the rest of the answer into one literal code
+    block:
+
+    * a closing `` ``` `` glued to the end of a content line (``foo.py``````) —
+      split it onto its own line so the block closes where the model intended;
+    * a fence left open at EOF (odd line-start fence count) — append the
+      missing closing fence.
+
+    Returns the repaired text; identical to `text` when already balanced.
+    """
+    out: list[str] = []
+    in_fence = False
+    fence_len = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip(" ")
+        if stripped.startswith("```"):
+            run = len(stripped) - len(stripped.lstrip("`"))
+            rest = stripped[run:].strip()
+            if not in_fence:
+                in_fence = True
+                fence_len = run
+            elif run >= fence_len and not rest:
+                in_fence = False
+            out.append(line)
+            continue
+        if in_fence and line.rstrip("\n").endswith("```"):
+            # Glued close: `<…>content``` → `<…>content` on its own line + close.
+            body = line.rstrip("\n")[:-3]
+            out.append(body + "\n```" + ("\n" if line.endswith("\n") else ""))
+            in_fence = False
+            continue
+        out.append(line)
+    result = "".join(out)
+    if in_fence:
+        result += "\n```"
+    return result
 
 # Result previews shown in collapsed tool boxes / the trace tab.
 PREVIEW_CHARS = 200
@@ -943,6 +989,21 @@ class HarnessTui(App):
             self._turn_raw.update(self._turn_raw_text)
         self._scroll_follow()
 
+    def _close_unclosed_fence(self) -> None:
+        """Repair a code fence the model left dangling (render-side only).
+
+        Called at turn end: split glued closing fences onto their own lines
+        and append a missing final close, so the tail of the answer isn't
+        swallowed into one literal code block. The transcript mirror keeps
+        the model's verbatim text untouched. No-op when already balanced.
+        """
+        if self._turn_md is None:
+            return
+        repaired = _repair_dangling_fence(self._turn_md_text)
+        if repaired != self._turn_md_text:
+            self._turn_md_text = repaired
+            self._turn_md.update(self._turn_md_text)
+
     def _append_reasoning(self, chunk: str) -> None:
         self.transcript.append(f"💭 {chunk}")
         self._reasoning_text += chunk
@@ -1240,6 +1301,7 @@ class HarnessTui(App):
     def turn_finished(self) -> None:
         self._hide_thinking()
         self._flush_md()
+        self._close_unclosed_fence()
         self.turn_active = False
         self.resume_next = True
         # Freeze the turn's average throughput on the bar until the next turn.
