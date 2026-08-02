@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from textual.containers import Vertical
 from textual.widgets import Input, Label, ListView, Static, TextArea
 
 from harness import config, sessions
@@ -271,7 +272,7 @@ class TestTui(unittest.TestCase):
                 prompt.text = "/"
                 await pilot.pause()
                 self.assertTrue(app._suggestions_visible)
-                # 9 commands now, but the popup caps at 8 rows + a "…" row.
+                # 11 commands now, but the popup caps at 8 rows + a "…" row.
                 self.assertEqual(len(app._suggestion_rows), 8)
                 self.assertTrue(app._suggest_more)
                 for cmd in (
@@ -282,7 +283,7 @@ class TestTui(unittest.TestCase):
                     "/memory",
                     "/model",
                     "/verbose",
-                    "/connect",
+                    "/sidebar",
                 ):
                     self.assertIn(cmd, app._suggestion_rows)
                 # The capped command still resolves by prefix.
@@ -310,6 +311,43 @@ class TestTui(unittest.TestCase):
                 self.assertEqual(
                     app._suggestion_rows, ["20260802-130000", "20260802-120000"]
                 )
+
+        asyncio.run(flow())
+
+    def test_sidebar_toggle(self):
+        """Ctrl+S and /sidebar hide/show the right sidebar; the conversation
+        pane keeps running a full turn while the sidebar is hidden."""
+
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Sidebar starts visible.
+                self.assertIs(app._sidebar_visible, True)
+                self.assertTrue(app.query_one("#sidebar", Vertical).display)
+
+                # App-level Ctrl+S hides it (TextArea never binds Ctrl+S).
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+                self.assertIs(app._sidebar_visible, False)
+                self.assertFalse(app.query_one("#sidebar", Vertical).display)
+                self.assertIn("sidebar hidden", "\n".join(app.transcript))
+
+                # The conversation pane still runs a full turn while hidden.
+                await self._submit_and_wait(app, "write hello.txt", pilot)
+                self.assertFalse(app.turn_active)
+                self.assertIn("Wrote hello.txt.", "\n".join(app.transcript))
+
+                # The /sidebar command toggles it back on.
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/sidebar"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIs(app._sidebar_visible, True)
+                self.assertTrue(app.query_one("#sidebar", Vertical).display)
+                self.assertIn("sidebar shown", "\n".join(app.transcript))
 
         asyncio.run(flow())
 

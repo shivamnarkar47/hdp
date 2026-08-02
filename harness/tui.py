@@ -128,6 +128,7 @@ COMMANDS = [
     "/memory",
     "/model",
     "/verbose",
+    "/sidebar",
     "/connect",
     "/quit",
     "/structure",
@@ -606,6 +607,9 @@ class HarnessTui(App):
         Binding("ctrl+c", "cancel_turn", "Cancel"),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "jump_to_bottom", "Jump to bottom", show=False),
+        # Plain app-level binding is enough: TextArea never binds Ctrl+S, so
+        # the unhandled key bubbles up from the focused prompt to the App.
+        Binding("ctrl+s", "toggle_sidebar", "Sidebar", show=False),
     ]
 
     def __init__(
@@ -653,6 +657,9 @@ class HarnessTui(App):
         self._prompt_input: PromptInput | None = None
         self._conversation: ConversationScroll | None = None
         self._trace: VerticalScroll | None = None
+        # Session-only preference (NOT persisted): the sidebar always starts
+        # visible; Ctrl+S / /sidebar hide or show it for this session.
+        self._sidebar_visible = True
         self._tool_count = len(self.tools.schemas())
         self._steps = 0
 
@@ -725,6 +732,8 @@ class HarnessTui(App):
         self._trace = self.query_one("#trace", VerticalScroll)
         self._prompt_input = self.query_one("#prompt", PromptInput)
         self._suggestions = self.query_one("#suggestions", Vertical)
+        # Apply the session state (covers a pre-mount action_toggle_sidebar).
+        self.query_one("#sidebar", Vertical).display = self._sidebar_visible
         self._render_home()
         self._structure_notice()
         self._refresh_memory()
@@ -1336,6 +1345,17 @@ class HarnessTui(App):
         self._follow = True
         self._conversation.scroll_end(animate=False)
 
+    def action_toggle_sidebar(self) -> None:
+        """Ctrl+S / /sidebar: hide or show the right sidebar (session-only)."""
+        self._sidebar_visible = not self._sidebar_visible
+        if self._conversation is None:
+            return  # pre-mount: on_mount applies the flipped state
+        self.query_one("#sidebar", Vertical).display = self._sidebar_visible
+        self._write_line(
+            "sidebar hidden" if not self._sidebar_visible else "sidebar shown",
+            classes="notice",
+        )
+
     # -- slash commands -----------------------------------------------------
 
     def _run_command(self, text: str) -> None:
@@ -1393,6 +1413,8 @@ class HarnessTui(App):
             self.verbose = not self.verbose
             self._write_line(f"verbose {'on' if self.verbose else 'off'}")
             self._render_status()
+        elif cmd == "/sidebar":
+            self.action_toggle_sidebar()
         elif cmd == "/quit":
             self.exit()
         else:
@@ -1401,11 +1423,12 @@ class HarnessTui(App):
     def _help(self) -> None:
         self._write_line(
             "commands: /help /new /resume <id> /sessions /memory /model /verbose "
-            "/connect /structure /quit"
+            "/sidebar /connect /structure /quit"
         )
         self._write_line(
             "keys: enter send · shift+enter newline · ctrl+p/n history · "
-            "tab complete · ctrl+l bottom · ctrl+c cancel · ctrl+q quit"
+            "tab complete · ctrl+l bottom · ctrl+s sidebar · ctrl+c cancel · "
+            "ctrl+q quit"
         )
 
 
