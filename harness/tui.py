@@ -18,6 +18,7 @@ markdown is capped; past the cap the overflow appends as a plain text block.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -371,6 +372,7 @@ class HarnessTui(App):
     CSS = """
     Screen {
         background: $surface;
+        padding: 1;
     }
 
     #conversation {
@@ -608,6 +610,14 @@ class HarnessTui(App):
         self._tool_count = len(self.tools.schemas())
         self._steps = 0
 
+        # Live throughput tracking for the status bar (tokens/sec).
+        self._stream_chars = 0
+        self._last_rate_chars = 0
+        self._turn_start: float | None = None
+        self._last_tick_time = 0.0
+        self._rate = 0.0
+        self._rate_timer: Any = None
+
         # Slash-command suggestion popup state.
         self._suggestions_visible = False
         self._suggestion_rows: list[str] = []
@@ -790,6 +800,14 @@ class HarnessTui(App):
         self.turn_active = True
         self._reset_turn_stream()
         self._show_thinking()
+        # Reset the throughput baseline and start the 1-second ticker.
+        self._turn_start = time.monotonic()
+        self._last_tick_time = self._turn_start
+        self._stream_chars = 0
+        self._last_rate_chars = 0
+        self._rate = 0.0
+        if self._rate_timer is None:
+            self._rate_timer = self.set_interval(1.0, self._tick_rate)
         self._prompt_input.disabled = True
         self._render_status()
         self.run_worker(self._thread_run, thread=True, group="agent")
@@ -832,6 +850,7 @@ class HarnessTui(App):
             self._show_thinking()
             self._render_status()
         elif kind == "content":
+            self._stream_chars += len(event[1])  # type: ignore[arg-type]
             self._ensure_assistant()
             self._append_content(event[1])  # type: ignore[arg-type]
         elif kind == "reasoning":
@@ -1189,11 +1208,27 @@ class HarnessTui(App):
     # -- status bar ---------------------------------------------------------
 
     def _render_status(self) -> None:
-        verbose = "verbose on" if self.verbose else "verbose off"
         self.query_one("#status", Static).update(
             f"{self.model_id} · {self.session_id} · step {self._steps}/{self.max_steps} · "
-            f"{self._tool_count} tools · {verbose} · Ctrl+C cancel"
+            f"{self._rate:.0f} tok/s · Ctrl+C cancel"
         )
+
+    @staticmethod
+    def _tokens_per_sec(chars: int, seconds: float) -> float:
+        """Chars→tokens at chars // 3 (matches the harness's estimate_tokens)."""
+        return chars / 3 / seconds if seconds > 0 else 0.0
+
+    def _tick_rate(self) -> None:
+        """1-second ticker: instantaneous tokens/sec since the last tick."""
+        if self._turn_start is None:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_tick_time
+        chars = self._stream_chars - self._last_rate_chars
+        self._rate = self._tokens_per_sec(chars, elapsed)
+        self._last_rate_chars = self._stream_chars
+        self._last_tick_time = now
+        self._render_status()
 
     # -- turn lifecycle -----------------------------------------------------
 
@@ -1202,6 +1237,14 @@ class HarnessTui(App):
         self._flush_md()
         self.turn_active = False
         self.resume_next = True
+        # Freeze the turn's average throughput on the bar until the next turn.
+        if self._turn_start is not None:
+            self._rate = self._tokens_per_sec(
+                self._stream_chars, time.monotonic() - self._turn_start
+            )
+        if self._rate_timer is not None:
+            self._rate_timer.stop()
+            self._rate_timer = None
         self._prompt_input.disabled = False
         self._prompt_input.focus()
         try:

@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from textual.widgets import Input, Label, ListView, TextArea
+from textual.widgets import Input, Label, ListView, Static, TextArea
 
 from harness import config, sessions
 from harness.art import SEA_LION
@@ -360,6 +360,34 @@ class TestTui(unittest.TestCase):
                 # Past MD_CHAR_CAP the overflow appends via the raw block;
                 # the full answer (incl. the tail) is mirrored to the transcript.
                 self.assertIn(big[-20:], "".join(app.transcript))
+
+        asyncio.run(flow())
+
+    def test_tokens_per_sec_helper(self):
+        self.assertEqual(HarnessTui._tokens_per_sec(300, 10), 10.0)
+        self.assertEqual(HarnessTui._tokens_per_sec(0, 0), 0.0)
+
+    def test_status_shows_tokens_per_sec(self):
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway([("content", "hello world"), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "say hi"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                # The turn's average throughput is frozen on the bar.
+                status = str(app.query_one("#status", Static).render())
+                self.assertIn("tok/s", status)
 
         asyncio.run(flow())
 
