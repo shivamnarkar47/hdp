@@ -22,9 +22,11 @@ one literal code block.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -671,6 +673,11 @@ class HarnessTui(App):
         self._rate = 0.0
         self._rate_timer: Any = None
 
+        # Running token/cost totals for the status bar (session-wide).
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0}
+        self._total_cost = 0.0
+        self._clock_timer: Any = None
+
         # Slash-command suggestion popup state.
         self._suggestions_visible = False
         self._suggestion_rows: list[str] = []
@@ -739,6 +746,9 @@ class HarnessTui(App):
         self._refresh_memory()
         self._refresh_sessions()
         self._render_status()
+        # 30s clock ticker keeps the status-bar date fresh; lives for the app
+        # lifetime (cheap single-widget update).
+        self._clock_timer = self.set_interval(30.0, self._render_status)
         self._prompt_input.focus()
 
     # -- input --------------------------------------------------------------
@@ -1282,11 +1292,50 @@ class HarnessTui(App):
 
     # -- status bar ---------------------------------------------------------
 
-    def _render_status(self) -> None:
-        self.query_one("#status", Static).update(
-            f"{self.model_id} · {self.session_id} · step {self._steps}/{self.max_steps} · "
-            f"{self._rate:.0f} tok/s · Ctrl+C cancel"
+    # tmux-style segmented blocks. Hardcoded ANSI-safe colors that read well
+    # on Textual's default dark theme (Rich Text styles cannot resolve
+    # Textual $design tokens, so the block backgrounds are literals); the
+    # center segment is unstyled and inherits #status's muted CSS color.
+    _STATUS_LEFT_STYLE = "bold #d7dae0 on #1f2430"
+    _STATUS_RIGHT_STYLE = "bold #eceff4 on #3b4252"
+
+    def _session_short(self) -> str:
+        """The HHMMSS part of a %Y%m%d-%H%M%S-%f session id (else last 6)."""
+        parts = self.session_id.split("-")
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+        return self.session_id[-6:]
+
+    def _status_bar(self, short_model: bool = False) -> Text:
+        """Build the tmux-style bar: left session block, muted center, clock."""
+        model = self.model_id
+        if short_model:
+            # deepseek-v4-flash -> v4-flash (last two dash chunks).
+            model = "-".join(model.split("-")[-2:])
+        rate = self.tools.cache_hit_rate()
+        cache = "cache –" if rate is None else f"cache {rate * 100:.0f}%"
+        clock = datetime.now().strftime("%a %d %b %H:%M")
+        bar = Text()
+        bar.append(
+            f" hdp · {model} · {self._session_short()} ", style=self._STATUS_LEFT_STYLE
         )
+        bar.append("│")
+        bar.append(f" step {self._steps}/{self.max_steps} ")
+        bar.append("│")
+        bar.append(f" {self._rate:.0f} tok/s ")
+        bar.append("│")
+        bar.append(f" {cache} ")
+        bar.append("│")
+        bar.append(f" ${self._total_cost:.4f} ")
+        bar.append("│")
+        bar.append(f" {clock} ", style=self._STATUS_RIGHT_STYLE)
+        return bar
+
+    def _render_status(self) -> None:
+        bar = self._status_bar()
+        if len(bar.plain) > 90:
+            bar = self._status_bar(short_model=True)
+        self.query_one("#status", Static).update(bar)
 
     @staticmethod
     def _tokens_per_sec(chars: int, seconds: float) -> float:
@@ -1321,6 +1370,15 @@ class HarnessTui(App):
         if self._rate_timer is not None:
             self._rate_timer.stop()
             self._rate_timer = None
+        # Accumulate the session's running cost on the bar (loop is still set
+        # here; each turn builds a fresh AgentLoop with its own usage dict).
+        if self._agent_loop is not None:
+            usage = self._agent_loop.usage
+            self._total_usage["input_tokens"] += usage.get("input_tokens", 0)
+            self._total_usage["output_tokens"] += usage.get("output_tokens", 0)
+            self._total_cost = config.estimate_cost(
+                self._total_usage["input_tokens"], self._total_usage["output_tokens"]
+            )
         self._prompt_input.disabled = False
         self._prompt_input.focus()
         try:

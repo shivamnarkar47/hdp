@@ -46,6 +46,18 @@ class TestUserKeyStore(unittest.TestCase):
                 # ~/nohome/.omp/agent/agent.db does not exist -> omp store misses
                 self.assertEqual(config.get_api_key(), "sk-user")
 
+    # -- cost estimation ----------------------------------------------------
+
+    def test_estimate_cost_zero_tokens(self):
+        self.assertEqual(config.estimate_cost(0, 0), 0.0)
+
+    def test_estimate_cost_1m_each(self):
+        # input $0.14/M + output $0.28/M = $0.42 per 1M tokens each.
+        self.assertEqual(config.estimate_cost(1_000_000, 1_000_000), 0.42)
+
+    def test_estimate_cost_cache_read_terms(self):
+        self.assertEqual(config.estimate_cost(0, 0, 1_000_000), 0.0028)
+
 
 if __name__ == "__main__":
     unittest.main()

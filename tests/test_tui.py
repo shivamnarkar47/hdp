@@ -545,6 +545,33 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_tmux_bar_contents(self):
+        """After two scripted turns the #status bar is tmux-style: session
+        block, step/tok/s/cache/cost segments, and a formatted clock — the raw
+        full session id never appears."""
+
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway(
+                    list(TURN_TOOL), list(TURN_STOP), list(TURN_TOOL), list(TURN_STOP)
+                ),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                await self._submit_and_wait(app, "turn one", pilot)
+                await self._submit_and_wait(app, "turn two", pilot)
+                status = str(app.query_one("#status", Static).render())
+                self.assertIn("step", status)
+                self.assertIn("tok/s", status)
+                self.assertIn("cache", status)
+                self.assertIn("$", status)
+                self.assertRegex(status, r"\d{2}:\d{2}")  # HH:MM clock
+                self.assertNotRegex(status, r"\d{8}-")  # raw session id stays out
+                self.assertGreater(app._total_cost, 0.0)
+
+        asyncio.run(flow())
+
     def test_thinking_indicator(self):
         async def flow() -> None:
             app = HarnessTui(

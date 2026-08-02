@@ -36,6 +36,31 @@ DSML_HEALING_PROVIDERS = {"opencode-go"}
 # Request timeout per HTTP request, seconds.
 REQUEST_TIMEOUT = 120
 
+# Catalog pricing (verified against @oh-my-pi/pi-catalog models.json, the
+# opencode-go/deepseek-v4-flash compat block): input $0.14/M, output $0.28/M,
+# cache-read $0.0028/M. Cache-read tokens are NOT received client-side
+# (stream_options rejected), so callers always pass cache_read_tokens=0.
+INPUT_COST_PER_M = 0.14
+OUTPUT_COST_PER_M = 0.28
+CACHE_READ_COST_PER_M = 0.0028
+
+
+def estimate_cost(
+    input_tokens: int, output_tokens: int, cache_read_tokens: int = 0
+) -> float:
+    """Estimated dollar cost for a token mix (per-1M catalog rates).
+
+    Rounded to 6 decimals so the sum of the three per-1M terms is exact for
+    whole-M token counts (0.14 + 0.28 would otherwise drift to
+    0.42000000000000004).
+    """
+    return round(
+        input_tokens / 1_000_000 * INPUT_COST_PER_M
+        + output_tokens / 1_000_000 * OUTPUT_COST_PER_M
+        + cache_read_tokens / 1_000_000 * CACHE_READ_COST_PER_M,
+        6,
+    )
+
 
 def user_key_path() -> Path:
     """Path of the user API-key store (`$XDG_CONFIG_HOME/harnessdp/api_key`).

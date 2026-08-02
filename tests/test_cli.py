@@ -149,6 +149,7 @@ class TestCli(unittest.TestCase):
         payload = json.loads(out.splitlines()[-1])
         self.assertIn("usage", payload)
         self.assertIn("answer", payload)
+        self.assertIn("cost", payload)  # estimated dollars from usage
         self.assertGreater(payload["usage"]["input_tokens"], 0)
 
     # -- run flags (tool cache / verify) -------------------------------------
@@ -267,6 +268,7 @@ class TestCli(unittest.TestCase):
         for record in payload:
             self.assertIn("usage", record)
             self.assertIn("steps", record)
+            self.assertIn("cost", record)  # estimated dollars from usage
             self.assertNotIn("error", record)
         files = list(sessions.get_store_dir().glob("*.jsonl"))
         self.assertEqual(len(files), 2)  # both sessions persisted

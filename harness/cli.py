@@ -213,8 +213,21 @@ def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
 
 
 def _public_record(record: dict) -> dict:
-    """Strip the internal ``error_kind`` field before JSON output."""
-    return {key: value for key, value in record.items() if key != "error_kind"}
+    """Strip the internal ``error_kind`` field before JSON output.
+
+    Success records gain ``cost`` (estimated dollars from the run's usage);
+    error records have no usage and therefore no cost field.
+    """
+    public = {key: value for key, value in record.items() if key != "error_kind"}
+    usage = record.get("usage")
+    if usage:
+        public["cost"] = round(
+            config.estimate_cost(
+                usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+            ),
+            6,
+        )
+    return public
 
 
 def _read_batch_prompts(path: str) -> list[str]:

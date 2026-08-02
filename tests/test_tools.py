@@ -14,6 +14,7 @@ from harness.tools import (
     ToolError,
     ToolRegistry,
 )
+from harness.toolcache import ToolCache
 
 
 class TestToolRegistry(unittest.TestCase):
@@ -376,6 +377,62 @@ class TestToolRegistry(unittest.TestCase):
         self.make("x.txt", "aa\n")
         result = self.reg.execute("grep", {"pattern": "[z-a]"})
         self.assertIn("invalid regex", result)
+
+
+class TestCacheCounters(unittest.TestCase):
+    """Cache-hit/miss visibility on a registry with a real ToolCache."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.project = Path(self._tmp.name)
+        self.make("a.txt", "hello\n")
+
+    def make(self, rel: str, content: str = "") -> Path:
+        path = self.project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def _cached_registry(self) -> ToolRegistry:
+        return ToolRegistry(
+            project_dir=self.project,
+            cache=ToolCache(self.project / ".hdp" / "tool-cache.json"),
+        )
+
+    def test_first_read_misses_second_hits(self):
+        """Same-signature repeat read: first miss, second hit, rate 0.5."""
+        reg = self._cached_registry()
+        reg.begin_batch(["read"], "sig-1")
+        reg.execute("read", {"path": "a.txt"})
+        reg.execute("read", {"path": "a.txt"})
+        self.assertEqual(reg.cache_misses, 1)
+        self.assertEqual(reg.cache_hits, 1)
+        self.assertEqual(reg.cache_hit_rate(), 0.5)
+
+    def test_no_lookups_rate_is_none(self):
+        reg = self._cached_registry()
+        self.assertEqual(reg.cache_hits, 0)
+        self.assertEqual(reg.cache_misses, 0)
+        self.assertIsNone(reg.cache_hit_rate())
+
+    def test_mutator_batch_bypass_counts_neither(self):
+        """A batch containing a mutator skips lookups; counters stay at zero."""
+        reg = self._cached_registry()
+        reg.begin_batch(["write", "read"], "sig-1")
+        reg.execute("read", {"path": "a.txt"})
+        self.assertEqual(reg.cache_hits, 0)
+        self.assertEqual(reg.cache_misses, 0)
+        self.assertIsNone(reg.cache_hit_rate())
+
+    def test_uncached_registry_never_looks_up(self):
+        """cache=None means every execute bypasses; rate stays None."""
+        reg = ToolRegistry(project_dir=self.project)
+        reg.begin_batch(["read"], "sig-1")
+        reg.execute("read", {"path": "a.txt"})
+        self.assertEqual(reg.cache_hits, 0)
+        self.assertEqual(reg.cache_misses, 0)
+        self.assertIsNone(reg.cache_hit_rate())
 
 
 if __name__ == "__main__":

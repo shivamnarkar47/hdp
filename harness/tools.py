@@ -107,6 +107,9 @@ class ToolRegistry:
         # a mutator (which disables cache lookups for the WHOLE batch).
         self._cache_signature: str | None = None
         self._batch_has_mutator = False
+        # Cache lookup counters (hit/miss; bypassed lookups count as neither).
+        self._cache_hits = 0
+        self._cache_misses = 0
         self._cached_schemas: list[dict] | None = None
         self._handlers: dict[str, Callable[[dict[str, Any]], str]] = {
             "read": self._tool_read,
@@ -183,11 +186,32 @@ class ToolRegistry:
             args_json = json.dumps(args, sort_keys=True)
             cached = self._cache.get(name, args_json, self._cache_signature)
             if cached is not None:
+                self._cache_hits += 1
                 return cached
+            self._cache_misses += 1
             result = self._run_handler(handler, name, args)
             self._cache.put(name, args_json, self._cache_signature, result)
             return result
         return self._run_handler(handler, name, args)
+
+    # -- cache visibility ---------------------------------------------------
+
+    @property
+    def cache_hits(self) -> int:
+        """Number of cache lookups that hit (served a stored result)."""
+        return self._cache_hits
+
+    @property
+    def cache_misses(self) -> int:
+        """Number of cache lookups that missed (ran the handler instead)."""
+        return self._cache_misses
+
+    def cache_hit_rate(self) -> float | None:
+        """Fraction of lookups that hit, or None when no lookups occurred."""
+        lookups = self._cache_hits + self._cache_misses
+        if lookups == 0:
+            return None
+        return self._cache_hits / lookups
 
     @staticmethod
     def _run_handler(
