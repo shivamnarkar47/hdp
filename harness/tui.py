@@ -46,6 +46,7 @@ from harness.art import SEA_LION
 from harness.gateway import Gateway
 from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
+from harness.structure import StructureManager
 from harness.tools import ToolRegistry
 
 # Streaming markdown is re-rendered whole-document per update; flush at most
@@ -81,6 +82,7 @@ COMMANDS = [
     "/verbose",
     "/connect",
     "/quit",
+    "/structure",
 ]
 
 # Braille spinner frames for the "thinking" indicator.
@@ -582,6 +584,7 @@ class HarnessTui(App):
             project_dir=self.project_dir,
             allow_dangerous=allow_dangerous,
         )
+        self.structure = StructureManager(self.project_dir)
 
         self.session_id = sessions.new_session_id()
         self.sub_title = f"{self.model_id} · {self.session_id}"
@@ -665,6 +668,7 @@ class HarnessTui(App):
         self._prompt_input = self.query_one("#prompt", PromptInput)
         self._suggestions = self.query_one("#suggestions", Vertical)
         self._render_home()
+        self._structure_notice()
         self._refresh_memory()
         self._refresh_sessions()
         self._render_status()
@@ -776,6 +780,7 @@ class HarnessTui(App):
             max_steps=self.max_steps,
             allow_dangerous=self.allow_dangerous,
             resume=self.resume_next,
+            structure=self.structure,
         )
         self._agent_loop = loop
         self._current_task = task
@@ -1002,6 +1007,28 @@ class HarnessTui(App):
         # Hero art: start at the top so the sea lion's head is in view.
         self._conversation.scroll_to(y=0, animate=False)
 
+    def _structure_notice(self) -> None:
+        """Ensure the structure cache and write a one-line dim summary."""
+        try:
+            self.structure.ensure()
+            text = self.structure.cache_path.read_text(encoding="utf-8")
+        except OSError:
+            self._write_line("structure: cache unavailable", classes="notice")
+            return
+        summary = ""
+        for line in text.splitlines():
+            if line.startswith("Files: "):
+                files, _, dirs = line.partition("·")
+                files = files.replace("Files:", "").strip()
+                dirs = dirs.replace("Dirs:", "").strip()
+                plural = "dir" if dirs == "1" else "dirs"
+                summary = f"{files} files · {dirs} {plural}"
+                break
+        if summary:
+            self._write_line(f"structure: {summary}", classes="notice")
+        else:
+            self._write_line(f"structure: {self.structure.cache_path}", classes="notice")
+
     def _render_user_block(self, text: str) -> None:
         self.transcript.append(f"▌ you\n{text}")
         self._conversation.mount(Static(f"▌ you\n{text}", classes="user-block", markup=False))
@@ -1166,6 +1193,10 @@ class HarnessTui(App):
         self.resume_next = True
         self._prompt_input.disabled = False
         self._prompt_input.focus()
+        try:
+            self.structure.refresh()  # tool-driven changes between turns
+        except OSError:
+            pass
         self._refresh_memory()
         self._refresh_sessions()
         self._render_status()
@@ -1217,6 +1248,15 @@ class HarnessTui(App):
                 self.push_screen(
                     ConnectScreen(config.load_user_api_key()), self._on_connect_result
                 )
+        elif cmd == "/structure":
+            try:
+                doc = self.structure.refresh()
+            except OSError as exc:
+                self._write_line(f"structure: error: {exc}", classes="error-box")
+                return
+            self._write_line(f"structure: {self.structure.cache_path}", classes="notice")
+            for line in doc.splitlines()[:100]:
+                self._write_line(line)
         elif cmd == "/memory":
             digest = self.memory.load_digest()
             if digest:
@@ -1240,7 +1280,7 @@ class HarnessTui(App):
     def _help(self) -> None:
         self._write_line(
             "commands: /help /new /resume <id> /sessions /memory /model /verbose "
-            "/connect /quit"
+            "/connect /structure /quit"
         )
         self._write_line(
             "keys: enter send · shift+enter newline · ctrl+p/n history · "

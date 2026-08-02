@@ -316,6 +316,28 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_structure_command(self):
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Mount created the cache and wrote the one-line notice.
+                transcript = "\n".join(app.transcript)
+                self.assertIn("structure:", transcript)
+                self.assertIn("files", transcript)
+                # /structure refreshes and dumps the doc + cache path.
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/structure"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                transcript = "\n".join(app.transcript)
+                self.assertIn(".hdp/STRUCTURE.md", transcript)
+                self.assertIn("# Project Structure", transcript)
+
+        asyncio.run(flow())
+
     def test_thinking_indicator(self):
         async def flow() -> None:
             app = HarnessTui(

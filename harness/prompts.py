@@ -50,7 +50,9 @@ def build_project_context(cwd: Path | str) -> str:
 
     When `<cwd>/AGENTS.md` exists its first 200 lines are included under a
     `## AGENTS.md (first 200 lines)` heading; otherwise a line notes its
-    absence.
+    absence. The regenerable structure cache (`.hdp/STRUCTURE.md`, if present)
+    is appended under `## Project structure` — read only, never scanned here
+    (fast reopen is the point).
     """
     cwd = Path(cwd).resolve()
     lines = [f"Date: {datetime.date.today().isoformat()}", f"CWD: {cwd}"]
@@ -60,4 +62,15 @@ def build_project_context(cwd: Path | str) -> str:
         lines.extend(agents.read_text(encoding="utf-8").splitlines()[:200])
     else:
         lines.append("No AGENTS.md found in this project.")
+    structure = cwd / ".hdp" / "STRUCTURE.md"
+    if structure.is_file():
+        lines.append("## Project structure")
+        try:
+            text = structure.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        lines.extend(text.splitlines()[:120])
+        lines.append("(full: .hdp/STRUCTURE.md — re-read it if the files change)")
+    else:
+        lines.append("No structure cache yet (.hdp/STRUCTURE.md missing)")
     return "\n".join(lines)

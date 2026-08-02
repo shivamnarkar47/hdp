@@ -91,6 +91,7 @@ class AgentLoop:
         max_steps: int = 20,
         allow_dangerous: bool = False,
         resume: bool = False,
+        structure: Any = None,
     ) -> None:
         self.gateway = gateway
         self.tools = tools
@@ -99,6 +100,7 @@ class AgentLoop:
         self.max_steps = max_steps
         self.allow_dangerous = allow_dangerous
         self.resume = resume
+        self._structure = structure
         self._messages: list[Message] = []
         self._system: SystemMessage | None = None
         self._consecutive_failures = 0
@@ -114,6 +116,15 @@ class AgentLoop:
         assert not self._ran, "run() may only be called once per AgentLoop instance"
         self._ran = True
         self.steps = 0
+
+        if self._structure is None:
+            from harness.structure import StructureManager
+
+            self._structure = StructureManager(self.tools.project_dir)
+        try:
+            self._structure.ensure()  # cache is best-effort; never break the turn
+        except OSError:
+            pass
 
         system = SystemMessage(
             prompts.build_system_prompt(
@@ -237,6 +248,12 @@ class AgentLoop:
 
         for call in calls:
             self._execute_one(call, emit)
+        # Tools (write/edit/bash) mutate the tree; refresh the structure cache
+        # cheaply (regenerates only when the signature changed).
+        try:
+            self._structure.refresh()
+        except OSError:
+            pass
         return None
 
     @staticmethod

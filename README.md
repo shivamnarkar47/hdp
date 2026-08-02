@@ -34,7 +34,9 @@ Both installers honor the `HDP_REPO_URL`, `HDP_INSTALL_DIR`, and `HDP_BIN_DIR` e
 - `hdp` — launch the Textual TUI
 - `hdp run "PROMPT"` — one-shot session from the CLI (`--dir`, `--model`, `--max-steps`, `--resume SESSION_ID`, `--json`, …)
 - `hdp sessions list` — list past sessions
-- TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/connect`, `/memory`, `/model`, `/verbose`, `/quit`
+- TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/connect`, `/structure`, `/memory`, `/model`, `/verbose`, `/quit`
+
+The project tree is scanned automatically and cached in `.hdp/STRUCTURE.md` (git-ignored, regenerable); it's injected into the system prompt and refreshed when files change.
 
 ## How it works
 

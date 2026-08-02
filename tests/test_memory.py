@@ -186,6 +186,27 @@ class TestPrompts(unittest.TestCase):
             self.assertIn("No AGENTS.md", ctx)
             self.assertNotIn("## AGENTS.md (first 200 lines)", ctx)
 
+    def test_project_context_includes_structure_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "proj3"
+            cwd.mkdir()
+            (cwd / ".hdp").mkdir()
+            (cwd / ".hdp" / "STRUCTURE.md").write_text(
+                "# Project Structure\nRoot: x\n## Tree\n└── README.md (5 B)\n",
+                encoding="utf-8",
+            )
+            ctx = build_project_context(cwd)
+            self.assertIn("## Project structure", ctx)
+            self.assertIn("└── README.md (5 B)", ctx)
+            self.assertIn("re-read it if the files change", ctx)
+
+    def test_project_context_missing_structure_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "proj4"
+            cwd.mkdir()
+            ctx = build_project_context(cwd)
+            self.assertIn("No structure cache yet", ctx)
+
     def test_build_system_prompt(self):
         digest = (
             "### Project State\n"

@@ -157,6 +157,10 @@
 
 **AGENTS.md = durable anchor; `.agent-memory/` = dynamic state.** Edit AGENTS.md only for stable, load-bearing facts; use memory files for evolving state.
 
+### Structure cache (`.hdp/STRUCTURE.md`)
+
+Regenerable cache — NOT memory. `harness/structure.py` scans the project tree (noise dirs skipped: `.git` `.venv` `node_modules` `.hdp` `dist` `build` `.omp` `__pycache__` + caches; depth ≤ 6, ≤ 20k entries, ≤ 500 lines) and writes a markdown tree under `.hdp/` (git-ignored; atomic temp+replace write). A signature (`<!-- sig: … -->` comment at the end) hashes (relpath, size, mtime_ns); `refresh()` regenerates only when it changed, `ensure()` never rescans an existing cache. The first ~120 lines are injected into the system prompt (`prompts.build_project_context`) so reopen is instant. Refreshed after every tool batch (`loop._one_step`) and between TUI turns (`turn_finished`); TUI shows a one-line summary on mount and `/structure` dumps the doc.
+
 ## 7. Tool preferences
 
 *Purpose: explore with the least context spend.*

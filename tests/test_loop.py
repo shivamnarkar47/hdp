@@ -169,6 +169,23 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual(tool_msgs[0]["tool_call_id"], assistant["tool_calls"][0]["id"])
         self.assertIn("wrote", tool_msgs[0]["content"])
 
+    def test_structure_cache_refreshed_after_tools(self):
+        turn1 = [
+            ("reasoning", "Let me check the directory"),
+            ("content", "I will write the file. "),
+            ("content", DSML_WRITE),
+            ("done", "tool_calls"),
+        ]
+        turn2 = [("content", "Wrote hello.txt."), ("done", "stop")]
+        gateway = FakeGateway(turn1, turn2)
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
+        loop.run("Write the file")
+        # The loop created the structure cache and refreshed it after the
+        # write tool, so the new file appears in the doc.
+        doc = (self.tempdir / ".hdp" / "STRUCTURE.md").read_text(encoding="utf-8")
+        self.assertIn("hello.txt", doc)
+        self.assertIn("<!-- sig: ", doc)
+
     def test_emit_none(self):
         gateway = FakeGateway([("content", "hi"), ("done", "stop")])
         loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
