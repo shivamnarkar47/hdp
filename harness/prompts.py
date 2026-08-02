@@ -1,0 +1,63 @@
+"""System-prompt assembly (memory digest + project context)."""
+
+from __future__ import annotations
+
+import datetime
+from pathlib import Path
+
+FIXED_PREFIX: str = (
+    "You are hdp — DeepSeek V4 Flash harness agent.\n"
+    "\n"
+    "Working rules:\n"
+    "- Cite file paths with backticks (`src/foo.py`), never bare prose names.\n"
+    "- Verify claims against actual file contents; do not trust remembered code.\n"
+    "- Prefer targeted reads — directory listing, then grep, then a line-selected "
+    "read — over whole-file reads.\n"
+    "\n"
+    "Tool use:\n"
+    "When you need a fact or a file operation, call a tool. You may batch "
+    "independent tool calls. The harness parses your DSML tool calls automatically.\n"
+    "\n"
+    "Output contract:\n"
+    "Final answers are plain text. Never emit tool markup, `reasoning_content`, "
+    "or `<think>` blocks in your visible answer.\n"
+    "\n"
+    "Boundaries:\n"
+    "Destructive bash commands are blocked; ask the user instead.\n"
+    "\n"
+    "Memory:\n"
+    "Project memory lives in `.agent-memory/`; after recording a decision or a "
+    "lesson, call `memory_append` to persist it.\n"
+    "\n"
+    "Tool schemas are provided only in the API `tools` parameter, never in prose."
+)
+
+
+def build_system_prompt(memory_digest: str, project_context: str) -> str:
+    """Assemble the full system prompt: fixed prefix + memory guidance + project.
+
+    Tier 3 is empty by design: per-turn content is the conversation itself, and
+    tool schemas travel only in the API `tools` parameter, never in prose.
+    """
+    dynamic = (
+        f"## Memory Guidance\n\n{memory_digest}\n\n## Project\n\n{project_context}"
+    )
+    return "\n\n".join([FIXED_PREFIX, dynamic])
+
+
+def build_project_context(cwd: Path | str) -> str:
+    """Short project context: today's date, the absolute cwd, and AGENTS.md.
+
+    When `<cwd>/AGENTS.md` exists its first 200 lines are included under a
+    `## AGENTS.md (first 200 lines)` heading; otherwise a line notes its
+    absence.
+    """
+    cwd = Path(cwd).resolve()
+    lines = [f"Date: {datetime.date.today().isoformat()}", f"CWD: {cwd}"]
+    agents = cwd / "AGENTS.md"
+    if agents.is_file():
+        lines.append("## AGENTS.md (first 200 lines)")
+        lines.extend(agents.read_text(encoding="utf-8").splitlines()[:200])
+    else:
+        lines.append("No AGENTS.md found in this project.")
+    return "\n".join(lines)

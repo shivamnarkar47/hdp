@@ -1,0 +1,176 @@
+# AGENTS.md — HarnessDP (`hdp`)
+
+> **Durable anchor memory.** The first 200 lines of this file are auto-injected into every hdp agent's system prompt (`harness/prompts.py` → `build_project_context`), so the top is the highest-signal content. Dynamic state lives in `.agent-memory/` (see §6).
+
+## TL;DR / 30-Second Orientation
+
+**What this is:** `harnessdp` = "hdp", a stdlib-only Python agent harness running **DeepSeek V4 Flash** with tools, persistent memory, sessions, and a Textual TUI. Only dependency: `textual`, used ONLY by the TUI.
+
+**Get productive immediately:**
+- `hdp` — launch the Textual TUI (default surface; requires an API key)
+- `hdp run "PROMPT" [flags]` — one-shot headless agent run
+- `hdp sessions list` — show persisted sessions
+- `.venv/bin/python -m unittest discover -s tests -v` — all 79 unit tests (stdlib unittest)
+
+**GOTCHA: the two hard things (know these before touching anything):**
+1. **DSML healing.** The model emits tool calls as a DSML XML envelope (`<｜DSML｜tool_calls>`, fullwidth pipe **U+FF5C**) that leaks into visible `delta.content` instead of arriving as structured `tool_calls`. `harness/dialect.py` `DialectFeed` heals it incrementally and strips leaked chat-template tokens (`<｜begin▁of▁sentence｜>`, `<｜Assistant｜>`, …). When both arrive, **structured tool_calls win** over healed ones (`loop.py`).
+2. **`reasoning_content` replay.** Assistant turns that made tool calls MUST re-send their streamed `reasoning_content` verbatim on the next request, or the gateway **400s on turn 2+**. `harness/messages.py` `AssistantMessage.to_wire()` always replays it. NEVER synthesize a placeholder.
+
+## Table of Contents
+
+| § | Section | When |
+|---|---|---|
+| 1 | [Commands](#1-commands) | build / test / run anything |
+| 2 | [Architecture](#2-architecture) | understand data flow |
+| 3 | [QUICK START MAP](#3-quick-start-map) | per-file first read |
+| 4 | [IF YOU SEE X → Y](#4-if-you-see-x--it-means-y) | confusing output |
+| 5 | [PITFALLS](#5-pitfalls) | before editing |
+| 6 | [Memory](#6-memory) | when to update what |
+| 7 | [Tool preferences](#7-tool-preferences) | efficient exploration |
+| 8 | [Navigation order](#8-navigation-order) | new-agent ramp |
+
+## 1. Commands
+
+*Purpose: every real command, copy-paste verified against the installed CLI.*
+
+| Command | What it does |
+|---|---|
+| `hdp` | Launch the Textual TUI (default surface; needs API key) |
+| `hdp run "PROMPT"` | One-shot headless run; answer to stdout |
+| `hdp run --help` | All run flags |
+| `hdp sessions list` | List sessions as `<id> <ts> <prompt>` |
+| `.venv/bin/python -m unittest discover -s tests -v` | All 79 unit tests |
+
+**`hdp run` flags** (from `--help`):
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `prompt` | task to run (positional) | required |
+| `--dir DIR` | project directory — tools are cwd-constrained to it | cwd |
+| `--model MODEL` | model id | `deepseek-v4-flash` |
+| `--max-steps MAX_STEPS` | max agent turns | 20 |
+| `--memory-root MEMORY_ROOT` | memory directory | `<dir>/.agent-memory` |
+| `--allow-dangerous` | skip the destructive-command DENY list | off |
+| `--resume SESSION_ID` | continue a session | none |
+| `--verbose` | print reasoning to stderr | off |
+| `--json` | final JSON line `{"session_id","answer","steps","tool_calls"}` | off |
+
+**Exit codes:** `0` answer produced · `1` config/key/gateway error · `2` loop error (max steps, context overflow, tool loop, 5 consecutive tool failures).
+
+**API key:** env `OPENCODE_API_KEY`, else omp auth store `~/.omp/agent/agent.db` (read-only sqlite), else exit 1 with instructions. Never cache or write it.
+
+**Sessions:** JSONL at `~/.local/share/harnessdp/sessions/` (override: env `HARNESSDP_SESSIONS_DIR`). Id format `%Y%m%d-%H%M%S` (`sessions.py`).
+
+**TUI slash commands** (`tui.py`):
+
+| Command | Action |
+|---|---|
+| `/help` | list commands |
+| `/new` | fresh session id, clear pane |
+| `/resume <id>` | continue a session |
+| `/sessions` | list persisted sessions |
+| `/memory` | show memory digest + file paths |
+| `/model` | show current model id |
+| `/verbose` | toggle reasoning display |
+| `/quit` | exit |
+
+**TUI keys:** `Ctrl+C` cancels the running turn (cooperative) · `Ctrl+Q` quits · `up`/`down` walk prompt history.
+
+## 2. Architecture
+
+*Purpose: the shape of the code in plain text — layering, data flow, no diagram.*
+
+**Data flow (one `hdp run`):** `cli.py` builds `Gateway` + `Memory` + `ToolRegistry` + `AgentLoop` → `loop.run(prompt, emit)`. Per turn: `to_wire_messages()` → `gateway.stream()` (SSE) → `DialectFeed` heals DSML out of `content` deltas → resolved `ToolCall`s → `ToolRegistry.execute()` → result appended as a tool message and persisted to the session JSONL → repeat until the model answers (no tool calls) or `max_steps`.
+
+**Layering:**
+- **Core — stdlib-only, ports 1:1 to Rust/Go:** `config.py`, `gateway.py`, `dialect.py`, `messages.py`, `context.py`, `loop.py`. No new dependencies, ever.
+- **Persistence:** `memory.py` (`.agent-memory/`), `sessions.py` (JSONL store).
+- **Tools:** `tools.py` — OpenAI function schemas + guarded execution (path confinement, DENY list).
+- **Front-end:** `tui.py` — the ONLY module importing `textual`; thin, disposable. `cli.py` lazy-imports it only on the no-subcommand path.
+- **Port seam:** the `AgentEvent` stream in `loop.py` — the TUI and `hdp run` both consume exactly this; never bypass it.
+- **Gateway behavior:** retries 5xx/network up to 3× (1s/2s/4s backoff); 4xx raises immediately; never retries after visible content.
+
+**Events:**
+- `AgentEvent` (loop → front end): `("content",str) | ("reasoning",str) | ("tool_start",ToolCall) | ("tool_result",id,str) | ("done",str) | ("error",str)`
+- `StreamEvent` (gateway → loop): `("content",str) | ("reasoning",str) | ("tool_call",ToolCall) | ("done",finish_reason) | ("error",str)`
+
+**PATTERN — canonical example:** `tests/test_loop.py::test_two_turn_tool_call_flow` shows the whole loop contract: fake gateway streams DSML → loop heals → executes → replays reasoning verbatim on turn 2 → persists → answers. Read this one test to learn the loop.
+
+## 3. QUICK START MAP
+
+*Purpose: file → purpose → when to open.*
+
+| File | Purpose | Open when… |
+|---|---|---|
+| `harness/cli.py` | Entry point: subcommands, flags, exit codes | tracing a command or exit code |
+| `harness/tui.py` | Textual app; slash commands; worker thread | working on the UI |
+| `harness/loop.py` | `AgentLoop`: stream→heal→execute→persist; `AgentEvent` seam | tracing agent behavior end-to-end |
+| `harness/gateway.py` | SSE client; wire body/headers; retries; port-boundary file | touching the wire protocol |
+| `harness/dialect.py` | DSML state machine + leaked-token stripper | healing bugs — every agent touches this eventually |
+| `harness/messages.py` | Wire model; `reasoning_content` replay rule | message shape, or 400s on turn 2+ |
+| `harness/context.py` | Token estimate + history truncation | budget / overflow logic |
+| `harness/tools.py` | Tool registry, schemas, path safety, DENY list | tools or safety |
+| `harness/memory.py` | `.agent-memory/` persistence, digest, caps | memory behavior |
+| `harness/sessions.py` | JSONL session store, resume replay | sessions / resume |
+
+## 4. IF YOU SEE X → IT MEANS Y
+
+*Purpose: decode confusing output instantly.*
+
+| You see… | It means… |
+|---|---|
+| DSML tags (`<｜DSML｜invoke …>`) in output | a tool call was healed by `DialectFeed` — don't strip it manually |
+| HTTP 400 on turn 2+ | `reasoning_content` was dropped; replay it verbatim (`messages.py`) |
+| Model never calls tools | no `tool_choice` support — never send it (nor `temperature` / `stream_options` / `store`) |
+| `…[truncated]` at the end of tool output | 10k-char cap (`MAX_RESULT_CHARS`, `tools.py`) |
+| `blocked by harness policy (destructive command)` | DENY list fired; re-run with `--allow-dangerous` only if intentional |
+| `old_text matches N times; pass all=true to replace all` | `edit` refuses ambiguous replaces |
+| `<think>…</think>` inside content | reasoning span — routed to `("reasoning", …)`, not answer text |
+| `Discarding unclosed DSML section…` (log) | envelope truncated mid-stream; `flush()` discarded it by design |
+| `tool loop detected` / `5 consecutive tool failures` | loop aborted; exit 2 |
+| `(busy — Ctrl+C cancels the current turn)` | TUI turn in flight; input disabled until done |
+
+## 5. PITFALLS
+
+*Purpose: mistakes that cost hours — read before editing.*
+
+- **PITFALL: core must stay stdlib-only.** `gateway/dialect/messages/context/loop` (plus `config/prompts/tools/memory/sessions`) map 1:1 to a Rust/Go port. No new deps in core. `textual` is legal ONLY in `harness/tui.py` (`cli.py` lazy-imports it).
+- **PITFALL: never send `tool_choice`, `temperature`, `stream_options`, or `store`.** This model rejects them (`gateway._build_body`); `test_build_body` asserts their absence.
+- **PITFALL: unicode markers are load-bearing.** ｜ = U+FF5C, ▁ = U+2581. Match them exactly (`FW = "\uff5c"`, `B = "\u2581"`; build fixtures from escapes, never paste glyphs). The model never trained on ASCII substitutes — transliterating breaks healing.
+- **PITFALL: reasoning replay is mandatory.** `AssistantMessage.to_wire()` re-sends `reasoning_content` when present; never synthesize a placeholder. Dropping it 400s on the next turn.
+- **PITFALL: call `DialectFeed.flush()` at end of stream** (the loop does); unclosed sections are deliberately discarded there, not raised.
+- **PITFALL: structured beats healed.** `calls = structured_calls if structured_calls else healed_calls` in `loop.py` — don't "fix" that precedence.
+- **PITFALL: tool results are strings.** 10k-char cap; `bash` timeout 30s default / 300s max; `grep` is case-insensitive unless `case:true`; `read` `offset` is 1-based.
+- **PITFALL: TUI thread rules.** The loop runs on a worker thread; that thread never touches widgets — events marshal via `call_from_thread`. Keep it that way.
+- **PITFALL: don't name an attribute `_loop` on the App** — Textual's `App._loop` is internal (`tui.py` comment; the field is `_agent_loop`).
+
+## 6. Memory
+
+*Purpose: what to persist, where, and when.*
+
+**Files** (committed, in `.agent-memory/`): `project-state.md` · `decisions.md` · `patterns.md` · `lessons-learned.md`.
+
+**Update triggers** — write after: milestone completion; architectural decisions; discovering non-obvious gotchas; fixing anything that consumed excessive time. Use the `memory_append` tool (sections: `project-state | decisions | patterns | lessons-learned`) or edit the files directly.
+
+**Rules** (`memory.py`): 200-line cap per file (oldest `##` section pruned); digest capped at 4000 est. tokens and 60 lines/section, head-biased — put critical notes early, keep entries self-contained; verbatim dedupe returns `already recorded`; each session outcome is auto-appended to `project-state.md` (`record_session_summary`).
+
+**AGENTS.md = durable anchor; `.agent-memory/` = dynamic state.** Edit AGENTS.md only for stable, load-bearing facts; use memory files for evolving state.
+
+## 7. Tool preferences
+
+*Purpose: explore with the least context spend.*
+
+1. **Directory listing** (`read` on a directory → ~2-level listing) to orient → **`grep`** to locate → **line-selected `read`** (`offset`/`limit` or `:N-M`) to read only what's needed.
+2. `grep` before whole-file reads, always. `glob` to map structure.
+3. Never whole-file-read to find one symbol; never re-read files you already have.
+
+## 8. Navigation order
+
+*Purpose: fastest ramp for a new agent.*
+
+1. This file (you're here).
+2. `tests/test_loop.py::test_two_turn_tool_call_flow` — the whole loop contract in one test.
+3. `harness/loop.py` → `harness/dialect.py` → `harness/messages.py` (the two hard things).
+4. `harness/cli.py` + `harness/gateway.py` (entry + wire).
+5. `harness/tools.py` (safety) → `harness/memory.py` + `harness/sessions.py` (persistence).
+6. `harness/tui.py` last — it's a thin consumer of the `AgentEvent` stream.

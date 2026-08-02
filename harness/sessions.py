@@ -1,0 +1,142 @@
+"""JSONL session store for interactive and resumed conversations."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+VALID_TYPES = {"user", "assistant", "tool_call", "tool_result", "error", "meta"}
+
+
+def get_store_dir() -> Path:
+    """Session store directory: $HARNESSDP_SESSIONS_DIR or the default XDG-ish path."""
+    override = os.environ.get("HARNESSDP_SESSIONS_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "share" / "harnessdp" / "sessions"
+
+
+def new_session_id() -> str:
+    """A session id unique to the second: `%Y%m%d-%H%M%S`."""
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def _session_path(session_id: str) -> Path:
+    return get_store_dir() / f"{session_id}.jsonl"
+
+
+def append_event(session_id: str, event: dict) -> None:
+    """Append one event as a JSON line: `{"ts", "type", "data"}`.
+
+    `type` must be one of user|assistant|tool_call|tool_result|error|meta
+    (ValueError otherwise). The store directory is created as needed.
+    """
+    etype = event.get("type")
+    if etype not in VALID_TYPES:
+        raise ValueError(f"invalid event type: {etype!r}; allowed: {sorted(VALID_TYPES)}")
+    data = event.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    store = get_store_dir()
+    store.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "type": etype,
+        "data": data,
+    }
+    with _session_path(session_id).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _event_to_wire(record: dict) -> dict | None:
+    """Convert one persisted event to an OpenAI wire dict, or None to skip it."""
+    etype = record.get("type")
+    data = record.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    if etype == "user":
+        return {"role": "user", "content": data.get("content", "")}
+    if etype == "assistant":
+        wire: dict[str, Any] = {"role": "assistant", "content": data.get("content", "")}
+        reasoning = data.get("reasoning_content")
+        if reasoning:
+            wire["reasoning_content"] = reasoning
+        tool_calls = data.get("tool_calls")
+        if tool_calls:
+            wire["tool_calls"] = tool_calls
+        return wire
+    if etype == "tool_result":
+        return {
+            "role": "tool",
+            "tool_call_id": data.get("tool_call_id", ""),
+            "content": data.get("content", ""),
+        }
+    return None  # tool_call, error, meta carry no replayable message
+
+
+def load_messages(session_id: str) -> list[dict]:
+    """Replay a session as OpenAI wire dicts in file order.
+
+    tool_call/error/meta events are skipped (tool calls ride inside the
+    assistant event). A missing session file yields []; corrupt JSON lines are
+    skipped.
+    """
+    path = _session_path(session_id)
+    if not path.exists():
+        return []
+    messages: list[dict] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            wire = _event_to_wire(record)
+            if wire is not None:
+                messages.append(wire)
+    return messages
+
+
+def list_sessions() -> list[dict]:
+    """Every `<id>.jsonl` sorted by id: `{"id", "ts", "prompt"}`.
+
+    `ts` is the first event's timestamp (or None), `prompt` the first user
+    event's content (or None). Missing or empty files are tolerated.
+    """
+    store = get_store_dir()
+    if not store.is_dir():
+        return []
+    sessions: list[dict] = []
+    for path in sorted(store.glob("*.jsonl"), key=lambda p: p.stem):
+        first_ts: str | None = None
+        first_prompt: str | None = None
+        try:
+            handle = path.open("r", encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if first_ts is None and record.get("ts"):
+                    first_ts = record["ts"]
+                if first_prompt is None and record.get("type") == "user":
+                    data = record.get("data")
+                    if isinstance(data, dict) and data.get("content"):
+                        first_prompt = data["content"]
+                if first_ts is not None and first_prompt is not None:
+                    break
+        sessions.append({"id": path.stem, "ts": first_ts, "prompt": first_prompt})
+    return sessions
