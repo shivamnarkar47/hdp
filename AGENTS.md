@@ -69,6 +69,7 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 | `kaal doctor` | Self-check: python, textual, api key, gateway, structure cache, sessions dir |
 | `kaal --version` | Print `kaal 0.1.0` and exit |
 | `.venv/bin/python -m unittest discover -s tests -v` | All unit tests |
+| `git config core.hooksPath .githooks` | Enable build-check hooks: pre-commit & pre-push run compileall + unittest + `kaal --version`; skip with `KAAL_SKIP_HOOKS=1` |
 
 `kaal run -` reads the prompt from stdin in place of `"PROMPT"` — the route for piped input.
 

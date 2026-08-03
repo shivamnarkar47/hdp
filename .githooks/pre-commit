@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs the shared build check (compileall + unittest + kaal --version).
+set -euo pipefail
+exec "$(dirname "$0")/build-check.sh"

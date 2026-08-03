@@ -75,6 +75,14 @@ Set `OPENCODE_API_KEY` in your environment, or save a key from the TUI with `/co
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+## Development
+
+Enable the build-check git hooks (compileall + unit tests + `kaal --version`, run on every commit and push):
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Uninstall
 
 Linux/macOS:
