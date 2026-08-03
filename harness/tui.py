@@ -551,7 +551,13 @@ class AgentsScreen(ModalScreen[tuple[str, str] | str | None]):
             (f"✓ {name}" if is_active else name),
             classes="agent-name active" if is_active else "agent-name",
         )
-        return ListItem(Vertical(name_label, Label(description, classes="agent-desc")))
+        return ListItem(
+            Vertical(
+                name_label,
+                Label(description, classes="agent-desc"),
+                classes="agent-row active" if is_active else "agent-row",
+            )
+        )
 
     def on_mount(self) -> None:
         if self._agents:
@@ -936,16 +942,11 @@ class HarnessTui(App):
         padding: 0 1;
     }
 
-    #composer-hint {
-        width: 1fr;
-        color: $text-muted;
-        content-align: left middle;
-    }
-
     #send-button {
         width: 11;
         height: 1;
         margin: 0;
+        dock: right;
     }
 
     #status {
@@ -1086,8 +1087,13 @@ class HarnessTui(App):
     }
 
     #agents-box {
-        width: 68;
-        max-height: 65%;
+        width: 62;
+        max-height: 70%;
+    }
+
+    #agents-box .connect-title {
+        color: $accent;
+        text-style: bold;
     }
 
     #session-list {
@@ -1098,21 +1104,44 @@ class HarnessTui(App):
 
     #agent-list {
         height: auto;
-        max-height: 14;
+        max-height: 18;
         margin-bottom: 1;
     }
 
+    #agent-list .agent-row {
+        height: auto;
+        padding: 0 1;
+    }
+
     #agent-list .agent-name {
+        color: $accent;
         text-style: bold;
     }
 
     #agent-list .agent-name.active {
         color: $accent;
-        text-style: bold;
+        text-style: bold underline;
+    }
+
+    #agent-list .agent-row.active {
+        background: $accent 12%;
     }
 
     #agent-list .agent-desc {
         color: $text-muted;
+        text-style: dim;
+        width: 1fr;
+    }
+
+    /* The focused row keeps Textual's block-cursor highlight readable: the
+       row's own accent/muted colors would otherwise sit on the solid cursor
+       background, so the selected row's text falls back to $text. */
+    #agent-list:focus > .list-item.-highlight .agent-name,
+    #agent-list:focus > .list-item.-highlight .agent-desc {
+        color: $text;
+    }
+
+    #agents-box .connect-hint {
         text-style: dim;
     }
 
@@ -1297,17 +1326,11 @@ class HarnessTui(App):
                 with Horizontal(id="composer-top"):
                     yield Static("Message kaal", id="composer-title", markup=False)
                     yield Static("ready", id="composer-state", markup=False)
-                yield PromptInput(
-                    id="prompt",
-                    placeholder="Ask a task…  Type / for commands",
-                    soft_wrap=True,
-                )
+                # No placeholder or key-hint line: /help documents the keys, and
+                # the input stays clean (a terminal cannot resize font per
+                # widget, so we keep the composer to just the compact input).
+                yield PromptInput(id="prompt", soft_wrap=True)
                 with Horizontal(id="composer-footer"):
-                    yield Static(
-                        "Enter send · Shift+Enter newline · Ctrl+P/N history",
-                        id="composer-hint",
-                        markup=False,
-                    )
                     yield Button("Send", id="send-button", variant="primary", compact=True)
             yield Static(id="status")
 

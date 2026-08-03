@@ -997,10 +997,10 @@ class TestTui(unittest.TestCase):
                     f"{app._tool_count} tools",
                     str(app.query_one("#sidebar-summary").render()),
                 )
-                self.assertIn(
-                    "Enter send",
-                    str(app.query_one("#composer-hint").render()),
-                )
+                # The composer is clean: no placeholder text, no key-hint line
+                # (the /help command documents the keys).
+                self.assertEqual(app.query_one("#prompt").placeholder, "")
+                self.assertEqual(len(app.query("#composer-hint")), 0)
                 self.assertEqual(len(app.query(".starter-explore")), 1)
                 clicked = await pilot.click(app.query_one(".starter-explore"))
                 self.assertTrue(clicked)
