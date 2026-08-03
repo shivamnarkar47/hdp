@@ -18,15 +18,25 @@ from pathlib import Path
 from unittest import mock
 
 from textual.containers import Vertical
-from textual.widgets import Input, Label, ListView, Static, TextArea
+from textual.widgets import Button, Input, Label, ListView, Static, TextArea
 
 from harness import agents, config, sessions
-from harness.art import BANNER_TAGLINE, BANNER_TITLE, SEA_LION
+from harness.art import (
+    BANNER_TAGLINE,
+    BANNER_TITLE,
+    KAAL_LOGO,
+    MAHABHARATA_ART,
+    SEA_LION,
+)
+from harness.messages import ToolCall
+from harness.sessions import read_events
 from harness.tui import (
     AGENT_GENERATOR_SYSTEM_PROMPT,
     AgentFormScreen,
     AgentIntentScreen,
     AgentsScreen,
+    AskScreen,
+    AskTextArea,
     ConnectScreen,
     HarnessTui,
     SessionsScreen,
@@ -268,6 +278,104 @@ class TestTui(unittest.TestCase):
                 self.assertEqual(app.gateway.api_key, "sk-test123")
                 self.assertEqual(config.user_key_path().read_text(), "sk-test123")
                 self.assertIn("connected: API key saved", "".join(app.transcript))
+
+        asyncio.run(flow())
+
+    def test_ask_user_modal_free_text(self):
+        """ask_user mid-turn pops the AskScreen; the typed answer becomes the
+        tool result and the turn completes with the modal dismissed."""
+        async def flow() -> None:
+            ask_turn = [
+                ("tool_call", ToolCall("a1", "ask_user", '{"question": "Proceed?"}')),
+                ("done", "tool_calls"),
+            ]
+            final = [("content", "Proceeding with your answer."), ("done", "stop")]
+            app = HarnessTui(
+                gateway=FakeGateway(list(ask_turn), list(final)),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "ask me"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                # The modal appears once the worker thread executes ask_user.
+                for _ in range(200):
+                    if isinstance(app.screen, AskScreen):
+                        break
+                    await pilot.pause(0.05)
+                self.assertIsInstance(app.screen, AskScreen)
+                answer_input = app.screen.query_one("#ask-text", AskTextArea)
+                answer_input.text = "go ahead"
+                answer_input.focus()
+                await pilot.pause()
+                await pilot.press("enter")  # AskTextArea.Submitted -> dismiss
+                for _ in range(200):  # up to ~10s for the turn to finish
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                self.assertFalse(app.turn_active)
+                self.assertNotIsInstance(app.screen, AskScreen)  # modal dismissed
+                transcript = "".join(app.transcript)
+                self.assertIn("Proceeding with your answer.", transcript)
+                # The typed answer IS the persisted tool result (the model
+                # used it to keep going).
+                persisted = [
+                    r for r in read_events(app.session_id) if r["type"] == "tool_result"
+                ]
+                self.assertEqual(persisted[-1]["data"]["content"], "go ahead")
+
+        asyncio.run(flow())
+
+    def test_ask_user_modal_option_buttons(self):
+        """ask_user with options: the modal shows one Button per option and
+        Enter on the focused (first) option picks it."""
+        async def flow() -> None:
+            ask_turn = [
+                (
+                    "tool_call",
+                    ToolCall(
+                        "a1",
+                        "ask_user",
+                        '{"question": "Which?", "options": ["alpha", "beta"]}',
+                    ),
+                ),
+                ("done", "tool_calls"),
+            ]
+            final = [("content", "picked"), ("done", "stop")]
+            app = HarnessTui(
+                gateway=FakeGateway(list(ask_turn), list(final)),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "pick"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):
+                    if isinstance(app.screen, AskScreen):
+                        break
+                    await pilot.pause(0.05)
+                self.assertIsInstance(app.screen, AskScreen)
+                buttons = app.screen.query(Button)
+                self.assertEqual(len(buttons), 2)
+                await pilot.press("enter")  # first option focused -> picks alpha
+                for _ in range(200):
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                self.assertFalse(app.turn_active)
+                self.assertNotIsInstance(app.screen, AskScreen)
+                persisted = [
+                    r for r in read_events(app.session_id) if r["type"] == "tool_result"
+                ]
+                self.assertEqual(persisted[-1]["data"]["content"], "alpha")
 
         asyncio.run(flow())
 
@@ -814,6 +922,9 @@ class TestTui(unittest.TestCase):
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
+                # The KAAL wordmark and the conch are the home heroes.
+                self.assertIn(KAAL_LOGO.splitlines()[0], transcript)
+                self.assertIn(MAHABHARATA_ART.splitlines()[0], transcript)
                 # The sea lion is no longer the home hero (still exported).
                 self.assertNotIn(SEA_LION.splitlines()[0], transcript)
                 # /new re-renders the home banner with a fresh session.
@@ -833,6 +944,73 @@ class TestTui(unittest.TestCase):
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
+
+        asyncio.run(flow())
+
+    def test_workspace_chrome_and_starter_action(self):
+        """The empty state exposes context, a clear composer, and a working starter."""
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway([("content", "Starter answer."), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                self.assertEqual(str(app.query_one("#brand-mark").render()), "KAAL")
+                self.assertIn(
+                    "fake-model", str(app.query_one("#topbar-session").render())
+                )
+                self.assertIn(
+                    "Yudhishthira",
+                    str(app.query_one("#conversation-context").render()),
+                )
+                self.assertIn(
+                    f"{app._tool_count} tools",
+                    str(app.query_one("#sidebar-summary").render()),
+                )
+                self.assertIn(
+                    "Enter send",
+                    str(app.query_one("#composer-hint").render()),
+                )
+                self.assertEqual(len(app.query(".starter-explore")), 1)
+                clicked = await pilot.click(app.query_one(".starter-explore"))
+                self.assertTrue(clicked)
+                for _ in range(200):
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                self.assertFalse(app.turn_active)
+                transcript = "".join(app.transcript)
+                self.assertIn(
+                    "Explore this repository and summarize its architecture.", transcript
+                )
+                self.assertIn("Starter answer.", transcript)
+
+        asyncio.run(flow())
+
+    def test_send_button_submits_composer_text(self):
+        """The visible Send button follows the same path as Enter."""
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway([("content", "Button answer."), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "sent from the button"
+                await pilot.click("#send-button")
+                for _ in range(200):
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                transcript = "".join(app.transcript)
+                self.assertIn("sent from the button", transcript)
+                self.assertIn("Button answer.", transcript)
+                self.assertEqual(app.query_one("#send-button").label, "Send")
 
         asyncio.run(flow())
 

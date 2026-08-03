@@ -1,9 +1,10 @@
-"""Textual split-pane TUI — the default kaal surface.
+"""Textual workspace UI — the default kaal surface.
 
-A polished agent client over :class:`harness.loop.AgentLoop`: a conversation
-pane (user blocks, streamed-markdown assistant turns, reasoning, collapsed
-tool boxes) on the left, a fixed sidebar (Trace / Memory / Sessions tabs) on
-the right, a multi-line prompt, and a one-line live status bar.
+The interface is organized as a calm workbench: a compact session bar, a
+framed conversation, a context sidebar, and an always-visible composer with
+starter actions on the empty state. Conversation rendering stays deliberately
+plain and inspectable: user blocks, streamed markdown, reasoning, tool cards,
+and notices all share one scrollable timeline.
 
 The heavy loop runs in a worker *thread* so streaming never blocks the UI.
 Thread widgets are untouchable, so the thread's emit callback marshals every
@@ -14,14 +15,14 @@ Streaming markdown is throttled: Textual's ``Markdown`` re-renders its whole
 document on every update, so content chunks accumulate in a pending buffer and
 are flushed at most once per ~100 ms (and always on turn end). A single turn's
 markdown is capped; past the cap the overflow appends as a plain text block.
-At turn end, a code fence the model left dangling (a closing ``` glued to a
-content line) is auto-closed so the tail of the answer isn't swallowed into
-one literal code block.
+At turn end, a code fence the model left dangling is repaired for rendering,
+while the transcript mirror preserves the model's verbatim content.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -36,7 +37,6 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
-    Header,
     Input,
     Label,
     ListItem,
@@ -49,7 +49,12 @@ from textual.widgets import (
 )
 
 from harness import agents, config, sessions
-from harness.art import BANNER_TAGLINE, BANNER_TITLE
+from harness.art import (
+    BANNER_TAGLINE,
+    BANNER_TITLE,
+    KAAL_LOGO,
+    MAHABHARATA_ART,
+)
 from harness.gateway import Gateway, GatewayError
 from harness.loop import AgentEvent, AgentLoop, ToolCall
 from harness.memory import SECTIONS, Memory
@@ -601,29 +606,208 @@ class AgentIntentScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-class HarnessTui(App):
-    """Split-pane chat TUI for kaal."""
+class AskTextArea(TextArea):
+    """Answer field for AskScreen: Enter submits instead of inserting a newline.
 
+    Textual's TextArea swallows Enter to insert a newline, so a screen-level
+    Enter binding never fires while it is focused. This subclass turns Enter
+    into a :class:`Submitted` message carrying the current text — one line,
+    submit-on-Enter, the right shape for a question answer.
+    """
+
+    class Submitted(Message):
+        """Fired on Enter; carries the answer text at that moment."""
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+            super().__init__()
+
+    def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            self.post_message(self.Submitted(self.text))
+            event.stop()
+            return
+        super()._on_key(event)
+
+
+class AskScreen(ModalScreen[str | None]):
+    """Modal question from the agent mid-turn (the ask_user tool).
+
+    With ``options``, each option is a Button — focus lands on the first,
+    Enter or click picks it. Without options, an :class:`AskTextArea` collects
+    a free-text answer — Enter submits, Esc cancels. Dismisses with the chosen
+    answer, or the string ``(cancelled)`` on Esc — the tool result must read
+    as an answer, never a silent dismiss.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, question: str, options: list[str] | None = None) -> None:
+        super().__init__()
+        self._question = question
+        self._options = options or []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="ask-box"):
+            yield Static(self._question, classes="connect-title", markup=False)
+            if self._options:
+                for index, option in enumerate(self._options):
+                    yield Button(option, id=f"ask-option-{index}")
+            else:
+                yield AskTextArea(id="ask-text")
+                yield Static("Enter submits · Esc cancels", classes="connect-hint")
+
+    def on_mount(self) -> None:
+        if self._options:
+            self.query_one("#ask-option-0", Button).focus()
+        else:
+            self.query_one("#ask-text", AskTextArea).focus()
+
+    @on(AskTextArea.Submitted)
+    def _on_text_submitted(self, event: AskTextArea.Submitted) -> None:
+        answer = event.text.strip()
+        if not answer:
+            return  # an empty answer is not an answer; keep the modal open
+        self.dismiss(answer)
+
+    @on(Button.Pressed)
+    def _on_option(self, event: Button.Pressed) -> None:
+        if not event.button.id or not event.button.id.startswith("ask-option-"):
+            return
+        index = int(event.button.id.rsplit("-", 1)[1])
+        self.dismiss(self._options[index])
+
+    def action_cancel(self) -> None:
+        self.dismiss("(cancelled)")
+
+
+class HarnessTui(App):
+    """Workbench-style chat TUI for kaal."""
     TITLE = "kaal"
 
     CSS = """
     Screen {
+        background: $background;
+        padding: 0;
+    }
+
+    #topbar {
+        height: 3;
+        padding: 0 2;
         background: $surface;
-        padding: 1;
+        border-bottom: solid $panel-lighten-1;
+    }
+
+    #brand-mark {
+        width: 12;
+        height: 3;
+        color: $accent;
+        text-style: bold;
+        content-align: left middle;
+    }
+
+    #topbar-context {
+        width: 1fr;
+        height: 3;
+        padding: 0 1;
+    }
+
+    #topbar-kicker {
+        height: 1;
+        color: $text-muted;
+        text-style: dim;
+    }
+
+    #topbar-session {
+        height: 1;
+        color: $text;
+    }
+
+    #topbar-actions {
+        width: auto;
+        height: 3;
+        align: right middle;
+    }
+
+    #topbar-actions Button {
+        height: 3;
+        min-width: 10;
+        margin: 0 0 0 1;
+        border: none;
+        background: $surface;
+        color: $text-muted;
+    }
+
+    #topbar-actions Button:hover,
+    #topbar-actions Button:focus {
+        background: $panel;
+        color: $accent;
+    }
+
+    #main {
+        height: 1fr;
+        padding: 1 2 0 2;
+    }
+
+    #conversation-frame {
+        width: 1fr;
+        height: 1fr;
+        background: $background;
+        border: round $panel-lighten-1;
+    }
+
+    #conversation-header {
+        height: 2;
+        padding: 0 2;
+        background: $surface;
+        border-bottom: solid $panel-lighten-1;
+    }
+
+    #conversation-title {
+        width: 1fr;
+        color: $text;
+        text-style: bold;
+        content-align: left middle;
+    }
+
+    #conversation-context {
+        width: auto;
+        color: $text-muted;
+        content-align: right middle;
     }
 
     #conversation {
-        width: 2fr;
+        width: 1fr;
         height: 1fr;
+        padding: 0 2;
         background: $background;
-        padding: 0 1 0 1;
     }
 
     #sidebar {
-        width: 34;
+        width: 32;
         height: 1fr;
+        margin-left: 1;
+        padding: 0;
         background: $panel;
-        border-left: solid $panel-lighten-1;
+        border: round $panel-lighten-1;
+    }
+
+    #sidebar-header {
+        height: 3;
+        padding: 0 1;
+        background: $surface;
+        color: $text;
+        text-style: bold;
+        content-align: left middle;
+    }
+
+    #sidebar-summary {
+        height: 2;
+        padding: 0 1;
+        color: $text-muted;
+        border-bottom: solid $panel-lighten-1;
     }
 
     #sidebar TabbedContent {
@@ -632,32 +816,152 @@ class HarnessTui(App):
 
     #sidebar TabPane {
         height: 1fr;
+        padding: 0;
     }
 
     #bottom {
         dock: bottom;
+        width: 1fr;
         height: auto;
+        padding: 0 2 0 2;
+        background: $background;
     }
 
-    #prompt {
-        height: 3;
-        margin: 0 1 0 1;
+    #suggestions {
+        display: none;
+        height: auto;
+        max-height: 10;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        overflow: hidden auto;
+        border: round $accent;
+        background: $panel;
     }
 
-    #status {
+    .suggest-row {
         height: 1;
         color: $text-muted;
     }
 
+    .suggest-row.highlight {
+        color: $accent;
+        text-style: bold;
+        background: $surface;
+    }
+
+    .suggest-more {
+        color: $text-muted;
+        text-style: dim;
+    }
+
+    #composer {
+        height: auto;
+        padding: 0 1;
+        background: $panel;
+        border: round $accent;
+    }
+
+    #composer-top {
+        height: 1;
+        padding: 0 1;
+    }
+
+    #composer-title {
+        width: 1fr;
+        color: $accent;
+        text-style: bold;
+    }
+
+    #composer-state {
+        width: auto;
+        color: $text-muted;
+        text-style: dim;
+    }
+
+    #prompt {
+        height: 3;
+        padding: 0 1;
+        background: $panel;
+        border: none;
+    }
+
+    #composer-footer {
+        height: 1;
+        padding: 0 1;
+    }
+
+    #composer-hint {
+        width: 1fr;
+        color: $text-muted;
+        content-align: left middle;
+    }
+
+    #send-button {
+        width: 11;
+        height: 1;
+        margin: 0;
+    }
+
+    #status {
+        height: 1;
+        margin: 0;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
+    .kaal-logo {
+        color: $accent;
+        margin: 1 0 0 0;
+        text-align: center;
+    }
+
+    .mahabharata-art {
+        color: $text-muted;
+        margin: 0;
+        text-align: center;
+    }
+
+    .banner-title {
+        color: $accent;
+        text-style: bold;
+        margin: 0;
+        text-align: center;
+    }
+
+    .banner-tagline {
+        color: $text-muted;
+        margin: 0;
+        text-align: center;
+    }
+
     .welcome {
         color: $text-muted;
-        margin: 1 0 1 0;
+        margin: 0;
+    }
+
+    .home-question {
+        color: $text;
+        text-style: bold;
+        text-align: center;
+        margin: 0;
+    }
+
+    .home-actions {
+        height: 1;
+        align: center middle;
+        margin: 0;
+    }
+
+    .home-actions Button {
+        min-width: 18;
+        margin: 0 1;
     }
 
     .user-block {
-        border: round $accent;
-        padding: 0 1;
+        padding: 1 2;
         margin: 1 0 1 0;
+        background: $panel;
+        border: round $panel-lighten-1;
     }
 
     .assistant-label {
@@ -677,10 +981,11 @@ class HarnessTui(App):
     }
 
     .tool-box {
-        border: round $surface-lighten-1;
-        padding: 0 1;
+        padding: 1 2;
         margin: 0 0 1 0;
         color: $text-muted;
+        background: $surface;
+        border: round $surface-lighten-1;
     }
 
     .turn-raw {
@@ -688,9 +993,11 @@ class HarnessTui(App):
     }
 
     .error-box {
-        border: round $error;
-        padding: 0 1;
+        padding: 1 2;
         margin: 1 0 1 0;
+        color: $error;
+        background: $surface;
+        border: round $error;
     }
 
     .notice {
@@ -698,9 +1005,15 @@ class HarnessTui(App):
         margin: 0 0 1 0;
     }
 
+    .thinking {
+        color: $accent;
+        text-style: dim;
+        margin: 0 0 1 0;
+    }
+
     .trace-line {
         color: $text-muted;
-        padding: 0 0 0 1;
+        padding: 0 1;
     }
 
     .sidebar-empty {
@@ -711,62 +1024,44 @@ class HarnessTui(App):
     .session-btn {
         width: 100%;
         max-width: 100%;
-        margin: 0 0 0 0;
-    }
-
-    #suggestions {
-        display: none;
-        height: auto;
-        max-height: 10;
-        border: round $accent;
-        background: $panel;
-        margin: 0 1 0 1;
-        padding: 0 1;
-        overflow: hidden auto;
-    }
-
-    .suggest-row {
-        color: $text-muted;
-    }
-
-    .suggest-row.highlight {
-        color: $accent;
-        text-style: bold;
-    }
-
-    .suggest-more {
-        color: $text-muted;
-        text-style: dim;
-    }
-
-    .thinking {
-        color: $text-muted;
-        text-style: dim;
-        margin: 0 0 1 0;
+        margin: 0;
+        content-align: left middle;
     }
 
     ConnectScreen,
     SessionsScreen,
     AgentsScreen,
     AgentFormScreen,
-    AgentIntentScreen {
+    AgentIntentScreen,
+    AskScreen {
         align: center middle;
     }
 
     #connect-box,
     #sessions-box,
-    #agents-box {
-        width: 52;
+    #agents-box,
+    #ask-box {
+        width: 60;
         height: auto;
         max-height: 80%;
-        border: round $accent;
+        padding: 2 3;
         background: $panel;
-        padding: 1 2;
+        border: round $accent;
+    }
+
+    #ask-box TextArea {
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    #ask-box Button {
+        width: 1fr;
+        margin-bottom: 1;
     }
 
     #agents-box {
-        width: 60;
-        max-height: 60%;
+        width: 68;
+        max-height: 65%;
     }
 
     #session-list {
@@ -777,7 +1072,7 @@ class HarnessTui(App):
 
     #agent-list {
         height: auto;
-        max-height: 12;
+        max-height: 14;
         margin-bottom: 1;
     }
 
@@ -815,19 +1110,6 @@ class HarnessTui(App):
 
     #connect-buttons Button {
         width: 1fr;
-    }
-
-    .banner-title {
-        color: $accent;
-        text-style: bold;
-        text-align: center;
-        margin-top: 2;
-    }
-
-    .banner-tagline {
-        color: $text-muted;
-        text-align: center;
-        margin-bottom: 1;
     }
     """
 
@@ -902,6 +1184,8 @@ class HarnessTui(App):
         self._current_task: str | None = None
 
         self._prompt_input: PromptInput | None = None
+        self._send_button: Button | None = None
+        self._composer_state: Static | None = None
         self._conversation: ConversationScroll | None = None
         self._trace: VerticalScroll | None = None
         # Session-only preference (NOT persisted): the sidebar always starts
@@ -956,11 +1240,24 @@ class HarnessTui(App):
     # -- widgets ------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
+        with Horizontal(id="topbar"):
+            yield Static("KAAL", id="brand-mark", markup=False)
+            with Vertical(id="topbar-context"):
+                yield Static("AI WORKBENCH", id="topbar-kicker", markup=False)
+                yield Static(id="topbar-session", markup=False)
+            with Horizontal(id="topbar-actions"):
+                yield Button("New chat", id="new-chat-button", compact=True)
+                yield Button("Sessions", id="sessions-button", compact=True)
+                yield Button("Agents", id="agents-button", compact=True)
         with Horizontal(id="main"):
-            with ConversationScroll(id="conversation"):
-                pass
+            with Vertical(id="conversation-frame"):
+                with Horizontal(id="conversation-header"):
+                    yield Static("Conversation", id="conversation-title", markup=False)
+                    yield Static(id="conversation-context", markup=False)
+                yield ConversationScroll(id="conversation")
             with Vertical(id="sidebar"):
+                yield Static("Workspace", id="sidebar-header", markup=False)
+                yield Static(id="sidebar-summary", markup=False)
                 with TabbedContent(initial="pane-trace"):
                     with TabPane("Trace", id="pane-trace"):
                         yield VerticalScroll(id="trace")
@@ -972,29 +1269,47 @@ class HarnessTui(App):
                             pass
         with Vertical(id="bottom"):
             yield Vertical(id="suggestions")
-            yield PromptInput(
-                id="prompt",
-                placeholder="Ask kaal… (/help)",
-                soft_wrap=True,
-            )
+            with Vertical(id="composer"):
+                with Horizontal(id="composer-top"):
+                    yield Static("Message kaal", id="composer-title", markup=False)
+                    yield Static("ready", id="composer-state", markup=False)
+                yield PromptInput(
+                    id="prompt",
+                    placeholder="Ask a task…  Type / for commands",
+                    soft_wrap=True,
+                )
+                with Horizontal(id="composer-footer"):
+                    yield Static(
+                        "Enter send · Shift+Enter newline · Ctrl+P/N history",
+                        id="composer-hint",
+                        markup=False,
+                    )
+                    yield Button("Send", id="send-button", variant="primary", compact=True)
             yield Static(id="status")
 
     def on_mount(self) -> None:
         self._conversation = self.query_one("#conversation", ConversationScroll)
         self._trace = self.query_one("#trace", VerticalScroll)
         self._prompt_input = self.query_one("#prompt", PromptInput)
+        self._send_button = self.query_one("#send-button", Button)
+        self._composer_state = self.query_one("#composer-state", Static)
         self._suggestions = self.query_one("#suggestions", Vertical)
         # Apply the session state (covers a pre-mount action_toggle_sidebar).
         self.query_one("#sidebar", Vertical).display = self._sidebar_visible
         self._render_home()
         self._structure_notice()
+        self._conversation.scroll_to(y=0, animate=False)
         self._refresh_memory()
         self._refresh_sessions()
+        self._render_topbar()
+        self._render_context()
+        self._render_composer_state()
         self._render_status()
         # 30s clock ticker keeps the status-bar date fresh; lives for the app
         # lifetime (cheap single-widget update).
         self._clock_timer = self.set_interval(30.0, self._render_status)
         self._prompt_input.focus()
+
 
     # -- input --------------------------------------------------------------
 
@@ -1012,6 +1327,85 @@ class HarnessTui(App):
             self._run_command(text)
         else:
             self._start_turn(text)
+
+    @on(Button.Pressed)
+    def _on_button_pressed(self, event: Button.Pressed) -> None:
+        """Route the visible workspace actions without hiding keyboard flows."""
+        button_id = event.button.id
+        if button_id == "send-button":
+            self._submit_from_button()
+        elif button_id == "new-chat-button":
+            self._run_command("/new")
+        elif button_id == "sessions-button":
+            self._run_command("/sessions")
+        elif button_id == "agents-button":
+            self._run_command("/agents")
+        elif "starter-explore" in event.button.classes:
+            self._start_starter("Explore this repository and summarize its architecture.")
+        elif "starter-fix" in event.button.classes:
+            self._start_starter("Inspect the repository for the highest-impact bug to fix.")
+        elif "starter-plan" in event.button.classes:
+            self._start_starter("Help me plan the next feature for this project.")
+
+
+    def _submit_from_button(self) -> None:
+        """Send the composer text, or cancel a live model turn."""
+        if self.turn_active:
+            if not self._generating_agent:
+                self.action_cancel_turn()
+            return
+        if self._prompt_input is None:
+            return
+        self._close_suggestions()
+        self._prompt_input._submit_text(self._prompt_input.text)
+
+    def _start_starter(self, task: str) -> None:
+        """Turn an empty-state suggestion into a normal prompt submission."""
+        if self.turn_active:
+            self._write_line("(busy — Ctrl+C cancels the current turn)", classes="notice")
+            return
+        self.prompt_history.append(task)
+        self._history_index = None
+        self._start_turn(task)
+
+    def _render_topbar(self) -> None:
+        """Keep the compact session identity visible above the conversation."""
+        session = self.query_one("#topbar-session", Static)
+        session.update(f"{self.model_id}  ·  session {self._session_short()}")
+
+    def _render_context(self) -> None:
+        """Refresh the two small context summaries outside the transcript."""
+        agent_name = self._active_agent["name"] if self._active_agent else "No active agent"
+        self.query_one("#conversation-context", Static).update(
+            f"{agent_name}  ·  {self.model_id}"
+        )
+        self.query_one("#sidebar-summary", Static).update(
+            f"{agent_name}  ·  {self._tool_count} tools"
+        )
+
+    def _render_composer_state(self) -> None:
+        """Show whether the composer is ready, generating, or cancelable."""
+        if self._composer_state is None:
+            return
+        if self._generating_agent:
+            label = "designing agent…"
+        elif self.turn_active:
+            label = "working · Ctrl+C to stop"
+        else:
+            label = "ready"
+        self._composer_state.update(label)
+        if self._send_button is not None:
+            self._send_button.label = "Cancel" if self.turn_active and not self._generating_agent else "Send"
+            self._send_button.disabled = self._generating_agent
+
+    def _set_busy_controls(self, active: bool) -> None:
+        """Lock navigation during a turn while leaving the cancel affordance live."""
+        for button_id in ("new-chat-button", "sessions-button", "agents-button"):
+            self.query_one(f"#{button_id}", Button).disabled = active
+        if self._prompt_input is not None:
+            self._prompt_input.disabled = active
+        self._render_composer_state()
+
 
     # -- slash-command suggestions -------------------------------------------
 
@@ -1104,6 +1498,7 @@ class HarnessTui(App):
             resume=self.resume_next,
             structure=self.structure,
             agent=self._active_agent,
+            ask_handler=self._ask_from_user,
         )
         self._agent_loop = loop
         self._current_task = task
@@ -1119,8 +1514,9 @@ class HarnessTui(App):
         self._rate = 0.0
         if self._rate_timer is None:
             self._rate_timer = self.set_interval(1.0, self._tick_rate)
-        self._prompt_input.disabled = True
+        self._set_busy_controls(True)
         self._render_status()
+
         self.run_worker(self._thread_run, thread=True, group="agent")
 
     def _thread_run(self, task: str | None = None) -> None:
@@ -1145,6 +1541,37 @@ class HarnessTui(App):
         if self._cancel_turn or self._agent_loop is not loop:
             raise TurnCancelled()
         self.call_from_thread(self._on_loop_event, event)
+
+    # -- ask_user (modal, tool worker thread) -------------------------------
+
+    def _ask_from_user(self, question: str, options: list[str] | None = None) -> str:
+        """Tool-worker-thread ask_user handler: show the modal, block for the answer.
+
+        Runs on the agent worker thread (the loop's tool execution is
+        synchronous there). The modal open is marshaled onto the main thread
+        via ``call_from_thread``; the worker then blocks on a threading.Event
+        until the modal's dismiss callback stores the answer. The modal being
+        on the screen stack already blocks prompt focus, so the wait is
+        invisible to the user. Any failure returns ``(error: ...)`` — never
+        crash the TUI.
+        """
+        self._ask_answer = None
+        self._ask_event = threading.Event()
+        try:
+            self.call_from_thread(self._ask_modal_open, question, options)
+            self._ask_event.wait()
+        except Exception as exc:  # noqa: BLE001 - transport slip -> answer string
+            return f"(error: {exc})"
+        return self._ask_answer if self._ask_answer is not None else "(cancelled)"
+
+    def _ask_modal_open(self, question: str, options: list[str] | None) -> None:
+        """Main thread: push the AskScreen modal with its result callback."""
+        self.push_screen(AskScreen(question, options), self._on_ask_result)
+
+    def _on_ask_result(self, answer: str | None) -> None:
+        """Main thread: modal dismissed — store the answer, release the worker."""
+        self._ask_answer = answer if answer is not None else "(cancelled)"
+        self._ask_event.set()
 
     # -- main-thread rendering ----------------------------------------------
 
@@ -1343,17 +1770,18 @@ class HarnessTui(App):
     # -- conversation helpers -----------------------------------------------
 
     def _render_home(self) -> None:
-        """Render the KESHAVLOK banner + welcome line (startup and `/new`).
-
-        Clears the pane and live-stream state, then mounts the banner title
-        (accent/bold) and tagline (dim) as styled Statics, and mirrors every
-        line plus the welcome line into the transcript, in order.
-        """
+        """Render the branded empty state with clear first actions."""
         self._conversation.remove_children()
         self.transcript.clear()
         self._follow = True
         self._reset_turn_stream()
         self._hide_thinking()
+        self.transcript.append(KAAL_LOGO)
+        self._conversation.mount(Static(KAAL_LOGO, classes="kaal-logo", markup=False))
+        self.transcript.append(MAHABHARATA_ART)
+        self._conversation.mount(
+            Static(MAHABHARATA_ART, classes="mahabharata-art", markup=False)
+        )
         self.transcript.append(BANNER_TITLE)
         self._conversation.mount(Static(BANNER_TITLE, classes="banner-title", markup=False))
         self.transcript.append(BANNER_TAGLINE)
@@ -1363,7 +1791,18 @@ class HarnessTui(App):
         welcome = f"kaal — {self.model_id} agent. Ask a task, or /help for commands."
         self.transcript.append(welcome)
         self._conversation.mount(Static(welcome, classes="welcome", markup=False))
-        # Banner first: start at the top so the title is in view.
+        self._conversation.mount(
+            Static("What would you like to work on?", classes="home-question", markup=False)
+        )
+        self._conversation.mount(
+            Horizontal(
+                Button("Explore repo", classes="starter-explore", compact=True),
+                Button("Find a bug", classes="starter-fix", compact=True),
+                Button("Plan a feature", classes="starter-plan", compact=True),
+                classes="home-actions",
+            )
+        )
+        # Banner first: start at the top so the title and actions are in view.
         self._conversation.scroll_to(y=0, animate=False)
 
     def _structure_notice(self) -> None:
@@ -1472,6 +1911,7 @@ class HarnessTui(App):
         self._render_history(sessions.load_messages(sid))
         self._refresh_sessions()
         self._render_status()
+        self._render_topbar()
 
     def _render_history(self, wire_messages: list[dict]) -> None:
         """Render a session's wire history (OpenAI wire dicts) into the pane.
@@ -1576,6 +2016,7 @@ class HarnessTui(App):
         agents.save(self.project_dir, self._agents)
         self._active_agent = agents.active_agent(self._agents)
         self._write_line(f"agent: {name} active", classes="notice")
+        self._render_context()
         self._render_status()  # the bar leads with the active agent's name
 
     def _add_agent(self, agent: dict, notice: str | None = None) -> None:
@@ -1595,12 +2036,14 @@ class HarnessTui(App):
                 self._write_line(
                     f"agent: {name} created (replaced existing)", classes="notice"
                 )
+                self._render_context()
                 self._render_status()
                 return
         self._agents["agents"].append(agent)
         self._agents["active"] = name
         agents.save(self.project_dir, self._agents)
         self._active_agent = agents.active_agent(self._agents)
+        self._render_context()
         self._write_line(notice or f"agent: {name} added and active", classes="notice")
         self._render_status()
 
@@ -1613,6 +2056,7 @@ class HarnessTui(App):
             self._agents["active"] = None
         agents.save(self.project_dir, self._agents)
         self._active_agent = agents.active_agent(self._agents)
+        self._render_context()
         self._write_line(f"agent: {name} deleted", classes="notice")
         self._render_status()
 
@@ -1657,6 +2101,7 @@ class HarnessTui(App):
             return
         self._generating_agent = True
         self.turn_active = True  # guards re-entry (action_agent_intent)
+        self._set_busy_controls(True)
         self._show_thinking()
         # run_worker takes no worker args (Textual 8.x), so the generator
         # arguments ride in a closure, like _start_turn reads _current_task.
@@ -1694,6 +2139,7 @@ class HarnessTui(App):
         """Main thread: parse the reply; add + activate on success."""
         self.turn_active = False
         self._generating_agent = False
+        self._set_busy_controls(False)
         self._hide_thinking()
         agent = _parse_agent_json(reply)
         if agent is None:
@@ -1707,6 +2153,7 @@ class HarnessTui(App):
         """Main thread: generator failure — dim notice, no crash."""
         self.turn_active = False
         self._generating_agent = False
+        self._set_busy_controls(False)
         self._hide_thinking()
         self._write_line(f"agent generator: {message}", classes="error-box")
 
@@ -1817,7 +2264,7 @@ class HarnessTui(App):
             self._total_cost = config.estimate_cost(
                 self._total_usage["input_tokens"], self._total_usage["output_tokens"]
             )
-        self._prompt_input.disabled = False
+        self._set_busy_controls(False)
         self._prompt_input.focus()
         try:
             self.structure.refresh()  # tool-driven changes between turns
@@ -1866,6 +2313,7 @@ class HarnessTui(App):
             self.sub_title = f"{self.model_id} · {self.session_id}"
             self._render_home()
             self._refresh_sessions()
+            self._render_topbar()
             self._render_status()
         elif cmd == "/resume":
             if not arg:
