@@ -2,12 +2,11 @@
 
 Exports, all stdlib-only and printable:
 
-* ``KAAL_LOGO`` — the figlet-style KAAL wordmark, the home-screen hero.
-* ``MAHABHARATA_ART`` — a simple Panchajanya conch, the Mahabharata mark
-  shown beneath the wordmark on the home screen.
+* ``KAAL_ART`` — the KAAL wordmark in block/box glyphs (▄ █ ▀), the
+  home-screen hero.
 * ``SEA_LION`` — the original home-screen hero (a sea lion, side-on, facing
   right). Kept for tests and anyone who wants it; the home screen now shows
-  the KAAL wordmark + conch instead.
+  the KAAL block wordmark instead.
 * ``BANNER_TITLE`` / ``BANNER_TAGLINE`` — the KESHAVLOK home banner.
   KESHAVLOK (Keshav + lok, "Keshav's world") is the brand term: Keshav —
   Krishna's name — was the mastermind of the Mahabharata, and the harness is
@@ -53,25 +52,12 @@ _RAW = """\
 """
 
 
-_KAAL_RAW = """\
-____  __.            .__                .____           __
-|    |/ _|____   _____|  |__ _____ ___  _|    |    ____ |  | __
-|      <_/ __ \\ /  ___/  |  \\\\__  \\\\  \\/ /    |   /  _ \\|  |/ /
-|    |  \\  ___/ \\___ \\|   Y  \\/ __ \\\\   /|    |__(  <_> )    <
-|____|__ \\___  >____  >___|  (____  /\\_/ |_______ \\____/|__|_ \\
-        \\/   \\/     \\/     \\/             \\/          \\/
-"""
-
-_MAHABHARATA_RAW = """\
-        ▄▄▄
-      ▄█   █▄
-     █       █
-    █  ▄▄▄▄▄  █
-    █ █     █ █
-    █ █     █ █
-     █ █▄▄▄█ █
-      ██   ██
-        █████
+_KAAL_ART_RAW = """\
+▄▄▄   ▄▄▄             ▄▄                ▄▄▄                   
+███ ▄███▀             ██                ███            ▄▄     
+███████   ▄█▀█▄ ▄█▀▀▀ ████▄  ▀▀█▄ ██ ██ ███      ▄███▄ ██ ▄█▀ 
+███▀███▄  ██▄█▀ ▀███▄ ██ ██ ▄█▀██ ██▄██ ███      ██ ██ ████   
+███  ▀███ ▀█▄▄▄ ▄▄▄█▀ ██ ██ ▀█▄██  ▀█▀  ████████ ▀███▀ ██ ▀█▄
 """
 
 
@@ -82,5 +68,4 @@ def _build(raw: str) -> str:
 
 
 SEA_LION = _build(_RAW)
-KAAL_LOGO = _build(_KAAL_RAW)
-MAHABHARATA_ART = _build(_MAHABHARATA_RAW)
+KAAL_ART = _build(_KAAL_ART_RAW)

@@ -24,8 +24,7 @@ from harness import agents, config, sessions
 from harness.art import (
     BANNER_TAGLINE,
     BANNER_TITLE,
-    KAAL_LOGO,
-    MAHABHARATA_ART,
+    KAAL_ART,
     SEA_LION,
 )
 from harness.messages import ToolCall
@@ -913,6 +912,16 @@ class TestTui(unittest.TestCase):
         widths = [len(line) for line in lines]
         self.assertLessEqual(max(widths) - min(widths), 2)  # padded rectangle
 
+    def test_kaal_art_shape(self):
+        lines = KAAL_ART.splitlines()
+        self.assertTrue(lines)
+        self.assertEqual(len(lines), 5)  # the block wordmark is exactly 5 lines
+        for line in lines:
+            self.assertLessEqual(len(line), 80)
+            self.assertNotIn("\t", line)
+        widths = [len(line) for line in lines]
+        self.assertEqual(len(set(widths)), 1)  # padded rectangle
+
     def test_home_banner(self):
         async def flow() -> None:
             app = self._app()
@@ -922,9 +931,9 @@ class TestTui(unittest.TestCase):
                 self.assertIn(BANNER_TITLE, transcript)
                 self.assertIn(BANNER_TAGLINE, transcript)
                 self.assertIn("Ask a task, or /help", transcript)
-                # The KAAL wordmark and the conch are the home heroes.
-                self.assertIn(KAAL_LOGO.splitlines()[0], transcript)
-                self.assertIn(MAHABHARATA_ART.splitlines()[0], transcript)
+                # The KAAL block wordmark is the home hero.
+                self.assertIn(KAAL_ART.splitlines()[0], transcript)
+                self.assertIn(KAAL_ART.splitlines()[-1], transcript)
                 # The sea lion is no longer the home hero (still exported).
                 self.assertNotIn(SEA_LION.splitlines()[0], transcript)
                 # /new re-renders the home banner with a fresh session.

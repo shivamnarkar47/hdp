@@ -54,8 +54,7 @@ from harness import agents, config, sessions
 from harness.art import (
     BANNER_TAGLINE,
     BANNER_TITLE,
-    KAAL_LOGO,
-    MAHABHARATA_ART,
+    KAAL_ART,
 )
 from harness.gateway import Gateway, GatewayError
 from harness.loop import AgentEvent, AgentLoop, ToolCall
@@ -960,12 +959,6 @@ class HarnessTui(App):
         text-align: center;
     }
 
-    .mahabharata-art {
-        color: $text-muted;
-        margin: 0;
-        text-align: center;
-    }
-
     .banner-title {
         color: $accent;
         text-style: bold;
@@ -1842,12 +1835,8 @@ class HarnessTui(App):
         self._follow = True
         self._reset_turn_stream()
         self._hide_thinking()
-        self.transcript.append(KAAL_LOGO)
-        self._conversation.mount(Static(KAAL_LOGO, classes="kaal-logo", markup=False))
-        self.transcript.append(MAHABHARATA_ART)
-        self._conversation.mount(
-            Static(MAHABHARATA_ART, classes="mahabharata-art", markup=False)
-        )
+        self.transcript.append(KAAL_ART)
+        self._conversation.mount(Static(KAAL_ART, classes="kaal-logo", markup=False))
         self.transcript.append(BANNER_TITLE)
         self._conversation.mount(Static(BANNER_TITLE, classes="banner-title", markup=False))
         self.transcript.append(BANNER_TAGLINE)
