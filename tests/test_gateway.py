@@ -453,7 +453,7 @@ class TestKeepAliveTransport(unittest.TestCase):
     def test_no_keepalive_env_uses_plain_urlopen(self):
         gateway = Gateway("https://example.test/v1", "sk-test", "deepseek-v4-flash")
         try:
-            with mock.patch.dict(os.environ, {"KALA_NO_KEEPALIVE": "1"}), mock.patch(
+            with mock.patch.dict(os.environ, {"KAAL_NO_KEEPALIVE": "1"}), mock.patch(
                 "urllib.request.urlopen", return_value=io.BytesIO(_SSE_BODY)
             ) as urlopen_mock:
                 gateway_mod._set_transport()

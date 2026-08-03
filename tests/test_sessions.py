@@ -21,19 +21,19 @@ from harness.sessions import (
 
 
 class SessionStoreTestCase(unittest.TestCase):
-    """Base with a private, disposable KALA_SESSIONS_DIR per test."""
+    """Base with a private, disposable KAAL_SESSIONS_DIR per test."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self._old_sessions_dir = os.environ.get("KALA_SESSIONS_DIR")
-        os.environ["KALA_SESSIONS_DIR"] = self._tmp.name
+        self._old_sessions_dir = os.environ.get("KAAL_SESSIONS_DIR")
+        os.environ["KAAL_SESSIONS_DIR"] = self._tmp.name
 
     def tearDown(self) -> None:
         if self._old_sessions_dir is None:
-            os.environ.pop("KALA_SESSIONS_DIR", None)
+            os.environ.pop("KAAL_SESSIONS_DIR", None)
         else:
-            os.environ["KALA_SESSIONS_DIR"] = self._old_sessions_dir
+            os.environ["KAAL_SESSIONS_DIR"] = self._old_sessions_dir
 
 
 class TestNewSessionId(unittest.TestCase):

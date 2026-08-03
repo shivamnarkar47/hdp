@@ -6,7 +6,7 @@ import datetime
 from pathlib import Path
 
 FIXED_PREFIX: str = (
-    "You are kala — DeepSeek V4 Flash harness agent.\n"
+    "You are kaal — DeepSeek V4 Flash harness agent.\n"
     "\n"
     "Working rules:\n"
     "- Cite file paths with backticks (`src/foo.py`), never bare prose names.\n"
@@ -66,7 +66,7 @@ def build_project_context(cwd: Path | str) -> str:
 
     When `<cwd>/AGENTS.md` exists its first 200 lines are included under a
     `## AGENTS.md (first 200 lines)` heading; otherwise a line notes its
-    absence. The regenerable structure cache (`.kala/STRUCTURE.md`, if present)
+    absence. The regenerable structure cache (`.kaal/STRUCTURE.md`, if present)
     is appended under `## Project structure` — read only, never scanned here
     (fast reopen is the point).
     """
@@ -78,7 +78,7 @@ def build_project_context(cwd: Path | str) -> str:
         lines.extend(agents.read_text(encoding="utf-8").splitlines()[:200])
     else:
         lines.append("No AGENTS.md found in this project.")
-    structure = cwd / ".kala" / "STRUCTURE.md"
+    structure = cwd / ".kaal" / "STRUCTURE.md"
     if structure.is_file():
         lines.append("## Project structure")
         try:
@@ -86,7 +86,7 @@ def build_project_context(cwd: Path | str) -> str:
         except OSError:
             text = ""
         lines.extend(text.splitlines()[:120])
-        lines.append("(full: .kala/STRUCTURE.md — re-read it if the files change)")
+        lines.append("(full: .kaal/STRUCTURE.md — re-read it if the files change)")
     else:
-        lines.append("No structure cache yet (.kala/STRUCTURE.md missing)")
+        lines.append("No structure cache yet (.kaal/STRUCTURE.md missing)")
     return "\n".join(lines)

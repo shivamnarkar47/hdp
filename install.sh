@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# kala installer — Linux/macOS
+# kaal installer — Linux/macOS
 #
-# Overrides (env): KALA_REPO_URL, KALA_INSTALL_DIR, KALA_BIN_DIR
+# Overrides (env): KAAL_REPO_URL, KAAL_INSTALL_DIR, KAAL_BIN_DIR
 set -euo pipefail
 
-REPO_URL="${KALA_REPO_URL:-https://github.com/shivamnarkar47/kala.git}"
-INSTALL_DIR="${KALA_INSTALL_DIR:-$HOME/.local/share/kala}"
-BIN_DIR="${KALA_BIN_DIR:-$HOME/.local/bin}"
+REPO_URL="${KAAL_REPO_URL:-https://github.com/shivamnarkar47/kaal.git}"
+INSTALL_DIR="${KAAL_INSTALL_DIR:-$HOME/.local/share/kaal}"
+BIN_DIR="${KAAL_BIN_DIR:-$HOME/.local/bin}"
 
 # version_ge A B — true if dotted numeric version A >= B
 version_ge() {
@@ -31,7 +31,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 PY_VERSION="$(python3 --version 2>&1 | awk '{print $2}')"
 if ! version_ge "$PY_VERSION" "3.12"; then
-  echo "Error: Python $PY_VERSION is too old; kala requires Python >= 3.12." >&2
+  echo "Error: Python $PY_VERSION is too old; kaal requires Python >= 3.12." >&2
   echo "Install Python 3.12 or newer (https://www.python.org/downloads/) and re-run." >&2
   exit 1
 fi
@@ -67,11 +67,11 @@ fi
 
 # --- Launcher ----------------------------------------------------------------
 mkdir -p "$BIN_DIR"
-cat > "$BIN_DIR/kala" <<EOF
+cat > "$BIN_DIR/kaal" <<EOF
 #!/bin/sh
 exec "$INSTALL_DIR/.venv/bin/python" -m harness "\$@"
 EOF
-chmod +x "$BIN_DIR/kala"
+chmod +x "$BIN_DIR/kaal"
 
 # --- PATH hint ---------------------------------------------------------------
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
@@ -81,10 +81,10 @@ fi
 
 # --- Success ----------------------------------------------------------------
 echo
-echo "kala installed successfully."
+echo "kaal installed successfully."
 echo "  Install dir: $INSTALL_DIR"
-echo "  Launcher:    $BIN_DIR/kala"
+echo "  Launcher:    $BIN_DIR/kaal"
 echo
-echo "Try:  kala --help"
+echo "Try:  kaal --help"
 echo "API key: set OPENCODE_API_KEY in your environment, or let the harness read the omp auth store."
 exit 0

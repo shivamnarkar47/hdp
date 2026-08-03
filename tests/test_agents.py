@@ -1,4 +1,4 @@
-"""Agent persona definitions + persistence tests (.kala/agents.json)."""
+"""Agent persona definitions + persistence tests (.kaal/agents.json)."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class TestAgents(unittest.TestCase):
         data = load(self.root)
         self.assertEqual([a["name"] for a in data["agents"]], [a["name"] for a in DEFAULT_AGENTS])
         self.assertIsNone(data["active"])
-        self.assertFalse((self.root / ".kala" / "agents.json").exists())
+        self.assertFalse((self.root / ".kaal" / "agents.json").exists())
 
     def test_save_load_round_trip(self):
         """Custom agents + active survive a save/load round-trip."""
@@ -50,11 +50,11 @@ class TestAgents(unittest.TestCase):
             "active": "Karna",
         }
         save(self.root, data)
-        self.assertTrue((self.root / ".kala" / "agents.json").is_file())
+        self.assertTrue((self.root / ".kaal" / "agents.json").is_file())
         self.assertEqual(load(self.root), data)
 
     def test_load_corrupt_file_seeds_defaults(self):
-        path = self.root / ".kala" / "agents.json"
+        path = self.root / ".kaal" / "agents.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{ definitely not json !!!", encoding="utf-8")
         data = load(self.root)
@@ -63,7 +63,7 @@ class TestAgents(unittest.TestCase):
 
     def test_load_malformed_shape_seeds_defaults(self):
         """A valid-JSON-but-wrong-shape file (agents not a list of dicts)."""
-        path = self.root / ".kala" / "agents.json"
+        path = self.root / ".kaal" / "agents.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"agents": "nope", "active": 3}), encoding="utf-8")
         data = load(self.root)

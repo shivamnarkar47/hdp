@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kala"
+name = "kaal"
 version = "0.1.0"
-description = "kala — a DeepSeek V4 Flash agent harness with a Textual TUI"
+description = "kaal — a DeepSeek V4 Flash agent harness with a Textual TUI"
 requires-python = ">=3.12"
 dependencies = ["textual"]
 
 [project.scripts]
-kala = "harness.cli:main"
+kaal = "harness.cli:main"
 
 [tool.setuptools]
 packages = ["harness", "tests"]

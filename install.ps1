@@ -1,15 +1,15 @@
-# install.ps1 - kala installer for Windows (PowerShell 5.1+)
+# install.ps1 - kaal installer for Windows (PowerShell 5.1+)
 # NOTE: written and reviewed on Linux; not executed here. The logic mirrors
 # install.sh. Test on a real Windows machine before relying on it.
 #
-# Overrides (env): KALA_REPO_URL, KALA_INSTALL_DIR, KALA_BIN_DIR
+# Overrides (env): KAAL_REPO_URL, KAAL_INSTALL_DIR, KAAL_BIN_DIR
 $ErrorActionPreference = 'Stop'
 
-$RepoUrl   = if ($env:KALA_REPO_URL)   { $env:KALA_REPO_URL }   else { 'https://github.com/shivamnarkar47/kala.git' }
-$InstallDir = if ($env:KALA_INSTALL_DIR) { $env:KALA_INSTALL_DIR } else { Join-Path $HOME '.local\share\kala' }
-$BinDir    = if ($env:KALA_BIN_DIR)    { $env:KALA_BIN_DIR }    else { Join-Path $HOME '.local\bin' }
+$RepoUrl   = if ($env:KAAL_REPO_URL)   { $env:KAAL_REPO_URL }   else { 'https://github.com/shivamnarkar47/kaal.git' }
+$InstallDir = if ($env:KAAL_INSTALL_DIR) { $env:KAAL_INSTALL_DIR } else { Join-Path $HOME '.local\share\kaal' }
+$BinDir    = if ($env:KAAL_BIN_DIR)    { $env:KAAL_BIN_DIR }    else { Join-Path $HOME '.local\bin' }
 
-function Test-KalaPythonVersion {
+function Test-KaalPythonVersion {
     param([string]$VersionText)
     $m = [regex]::Match($VersionText, 'Python\s+(\d+)\.(\d+)')
     if (-not $m.Success) { return $false }
@@ -29,7 +29,7 @@ foreach ($cand in @(@('py', '-3.12'), @('py'), @('python'))) {
     } else {
         $out = & $cmd --version 2>&1
     }
-    if (Test-KalaPythonVersion ($out | Out-String)) {
+    if (Test-KaalPythonVersion ($out | Out-String)) {
         $PythonCmd = $cmd
         if ($cand.Count -gt 1) { $PythonArg = $cand[1] }
         Write-Host "Found Python: $(($out | Out-String).Trim()) (via $cmd $PythonArg)"
@@ -54,7 +54,7 @@ elseif (Get-Command git -ErrorAction SilentlyContinue) {
 }
 else {
     Write-Host "git not found; downloading a tarball of the main branch"
-    $Tarball = Join-Path $env:TEMP 'kala.tar.gz'
+    $Tarball = Join-Path $env:TEMP 'kaal.tar.gz'
     Invoke-WebRequest -UseBasicParsing "$($RepoUrl.TrimEnd('.git'))/archive/refs/heads/main.tar.gz" -OutFile $Tarball
     # bsdtar ships with Windows 10 1803+ and reads .tar.gz directly.
     if (Get-Command tar -ErrorAction SilentlyContinue) {
@@ -64,7 +64,7 @@ else {
         # so decompress the .tar.gz to a plain .tar first. If the system's
         # Expand-Archive still cannot read that .tar (Windows PowerShell 5.1),
         # installing Git for Windows is the fix.
-        $PlainTar = Join-Path $env:TEMP 'kala.tar'
+        $PlainTar = Join-Path $env:TEMP 'kaal.tar'
         $src = [System.IO.File]::OpenRead($Tarball)
         $gz = New-Object System.IO.Compression.GZipStream($src, [System.IO.Compression.CompressionMode]::Decompress)
         $dst = [System.IO.File]::Create($PlainTar)
@@ -95,7 +95,7 @@ try {
 
 # --- Launcher ----------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-$Launcher = Join-Path $BinDir 'kala.cmd'
+$Launcher = Join-Path $BinDir 'kaal.cmd'
 @"
 @echo off
 "$InstallDir\.venv\Scripts\python.exe" -m harness %*
@@ -111,11 +111,11 @@ if ($env:PATH -notlike "*$BinDir*") {
 # --- Success -----------------------------------------------------------------
 $RawBase = $RepoUrl -replace '^https://github\.com/', 'https://raw.githubusercontent.com/' -replace '\.git$', ''
 Write-Host ""
-Write-Host "kala installed successfully."
+Write-Host "kaal installed successfully."
 Write-Host "  Install dir: $InstallDir"
 Write-Host "  Launcher:    $Launcher"
 Write-Host ""
-Write-Host "Try:  kala --help"
+Write-Host "Try:  kaal --help"
 Write-Host "Reinstall/update:  irm $RawBase/install.ps1 | iex"
 Write-Host "API key: set OPENCODE_API_KEY in your environment, or let the harness read the omp auth store."
 exit 0

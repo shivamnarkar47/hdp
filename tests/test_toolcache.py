@@ -14,7 +14,7 @@ class TestToolCache(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.path = Path(self._tmp.name) / ".kala" / "tool-cache.json"
+        self.path = Path(self._tmp.name) / ".kaal" / "tool-cache.json"
 
     # -- put/get ------------------------------------------------------------
 

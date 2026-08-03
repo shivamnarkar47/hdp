@@ -85,16 +85,16 @@ class TestTui(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        self._old_sessions_dir = os.environ.get("KALA_SESSIONS_DIR")
-        os.environ["KALA_SESSIONS_DIR"] = str(self.root / "sessions")
+        self._old_sessions_dir = os.environ.get("KAAL_SESSIONS_DIR")
+        os.environ["KAAL_SESSIONS_DIR"] = str(self.root / "sessions")
         self._old_xdg = os.environ.get("XDG_CONFIG_HOME")
         os.environ["XDG_CONFIG_HOME"] = str(self.root / "config")
 
     def tearDown(self) -> None:
         if self._old_sessions_dir is None:
-            os.environ.pop("KALA_SESSIONS_DIR", None)
+            os.environ.pop("KAAL_SESSIONS_DIR", None)
         else:
-            os.environ["KALA_SESSIONS_DIR"] = self._old_sessions_dir
+            os.environ["KAAL_SESSIONS_DIR"] = self._old_sessions_dir
         if self._old_xdg is None:
             os.environ.pop("XDG_CONFIG_HOME", None)
         else:
@@ -138,7 +138,7 @@ class TestTui(unittest.TestCase):
         """A hooks file + a mutating turn renders the dim `🧪 verify` pane line
         (fast hook: python -c print)."""
         async def flow() -> None:
-            hooks = self.root / ".kala" / "hooks.json"
+            hooks = self.root / ".kaal" / "hooks.json"
             hooks.parent.mkdir(parents=True, exist_ok=True)
             hooks.write_text(
                 json.dumps({"verify": ["python", "-c", "print('verify-ok')"]}),
@@ -853,7 +853,7 @@ class TestTui(unittest.TestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 transcript = "\n".join(app.transcript)
-                self.assertIn(".kala/STRUCTURE.md", transcript)
+                self.assertIn(".kaal/STRUCTURE.md", transcript)
                 self.assertIn("# Project Structure", transcript)
 
         asyncio.run(flow())

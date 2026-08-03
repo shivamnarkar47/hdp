@@ -57,3 +57,21 @@ session: Say 'two' → ok
 
 ## 2026-08-02 23:52
 session: Say 'one' → ok
+
+## 2026-08-02 23:55
+session: hello → ok
+
+## 2026-08-02 23:55
+session: What this repo all about ? → ok
+
+## 2026-08-02 23:57
+session: Yes tell me about loop and DSML dialect. → ok
+
+## 2026-08-03 00:10
+session: Give me details about loop and dialect → ok
+
+## 2026-08-03 00:11
+session: Hey → ok
+
+## 2026-08-03 00:12
+session: What's the tradeoffs now → ok
