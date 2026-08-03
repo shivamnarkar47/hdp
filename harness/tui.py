@@ -11,12 +11,14 @@ Thread widgets are untouchable, so the thread's emit callback marshals every
 event back to the main thread via ``App.call_from_thread``; the main-thread
 handler is the only place that writes to widgets.
 
-Streaming markdown is throttled: Textual's ``Markdown`` re-renders its whole
-document on every update, so content chunks accumulate in a pending buffer and
-are flushed at most once per ~100 ms (and always on turn end). A single turn's
-markdown is capped; past the cap the overflow appends as a plain text block.
-At turn end, a code fence the model left dangling is repaired for rendering,
-while the transcript mirror preserves the model's verbatim content.
+Streaming markdown is windowed: a turn's answer renders into a list of
+bounded ``Markdown`` windows (~4.5k chars each), and every flush re-renders
+only the ACTIVE window — the per-flush cost stays bounded no matter how long
+the turn grows. Small deltas flush synchronously (no timer wait); large
+bursts are throttled to the adaptive ~100 ms cadence. A code fence that
+spans a window boundary is repaired render-side so blocks stay contiguous,
+and at turn end a fence the model left dangling is closed; the transcript
+mirror preserves the model's verbatim content.
 """
 
 from __future__ import annotations
@@ -61,12 +63,15 @@ from harness.memory import SECTIONS, Memory
 from harness.structure import StructureManager
 from harness.tools import ToolRegistry
 
-# Streaming markdown is re-rendered whole-document per update; flush at most
-# every ~100 ms (slower for big docs) and cap one turn's markdown so a
-# pathological turn can't jank the UI or blow up the widget. Past the cap the
-# overflow appends as a plain text block (~16-20 ms worst flush at 10k).
+# Streaming markdown is windowed: content appends to the ACTIVE window and
+# each flush re-renders only that window (MD_WINDOW_CHARS of text ~= a few ms
+# parse), so per-flush cost is bounded regardless of turn length. Small
+# deltas (< MD_INSTANT_FLUSH_CHARS) flush synchronously — no 100 ms timer
+# wait; only large bursts are throttled (adaptive: 0.1 s small / 0.25 s past
+# 20k accumulated).
 MD_FLUSH_SECONDS = 0.1
-MD_CHAR_CAP = 10_000
+MD_INSTANT_FLUSH_CHARS = 2_000  # pending under this -> flush right away
+MD_WINDOW_CHARS = 4_500  # close a markdown window past this many chars
 
 
 def _repair_dangling_fence(text: str) -> str:
@@ -111,8 +116,48 @@ def _repair_dangling_fence(text: str) -> str:
         result += "\n```"
     return result
 
-# Result previews shown in collapsed tool boxes / the trace tab.
+
+def _fence_balance(text: str) -> int:
+    """0 when code fences balance; the opener's run length when one is open.
+
+    Line-start fences only (CommonMark semantics mirrored from
+    ``_repair_dangling_fence``); a glued ````` glued to a content line does not
+    close a fence here — that slip is repaired at turn end.
+    """
+    balance = 0
+    for line in text.splitlines():
+        stripped = line.lstrip(" ")
+        if not stripped.startswith("```"):
+            continue
+        run = len(stripped) - len(stripped.lstrip("`"))
+        rest = stripped[run:].strip()
+        if balance == 0:
+            balance = run
+        elif run >= balance and not rest:
+            balance = 0
+    return balance
+
+
+def _close_md_window(text: str, cut: int) -> tuple[str, str]:
+    """Split streaming markdown at `cut` into (closed_window, remainder).
+
+    Render-side only (the transcript mirror keeps the verbatim text). If the
+    cut lands inside an open code fence, the closed window gets a closing
+    fence appended and the remainder gets an opening fence prepended, so the
+    block renders contiguously across the window boundary (and across as many
+    windows as the fence spans).
+    """
+    closed, rest = text[:cut], text[cut:]
+    open_run = _fence_balance(closed)
+    if open_run:
+        closed += "\n```"
+        rest = "```\n" + rest
+    return closed, rest
+
+# Result preview caps: the sidebar Trace tab stays the detailed view
+# (PREVIEW_CHARS); the compact conversation tool line shows ~120 chars.
 PREVIEW_CHARS = 200
+TOOL_PREVIEW_CHARS = 120
 
 # Content starting with any of these counts as a failed tool result.
 _ERROR_STARTS = (
@@ -939,17 +984,10 @@ class HarnessTui(App):
         margin: 0;
     }
 
-    .home-question {
-        color: $text;
-        text-style: bold;
-        text-align: center;
-        margin: 0;
-    }
-
     .home-actions {
         height: 1;
         align: center middle;
-        margin: 0;
+        margin: 0 0 1 0;
     }
 
     .home-actions Button {
@@ -959,7 +997,7 @@ class HarnessTui(App):
 
     .user-block {
         padding: 1 2;
-        margin: 1 0 1 0;
+        margin: 0 0 1 0;
         background: $panel;
         border: round $panel-lighten-1;
     }
@@ -967,7 +1005,7 @@ class HarnessTui(App):
     .assistant-label {
         color: $accent;
         text-style: bold;
-        margin-top: 1;
+        margin-top: 0;
     }
 
     .assistant-md {
@@ -980,15 +1018,8 @@ class HarnessTui(App):
         margin: 0 0 1 0;
     }
 
-    .tool-box {
-        padding: 1 2;
-        margin: 0 0 1 0;
+    .tool-line {
         color: $text-muted;
-        background: $surface;
-        border: round $surface-lighten-1;
-    }
-
-    .turn-raw {
         margin: 0 0 1 0;
     }
 
@@ -1224,12 +1255,10 @@ class HarnessTui(App):
         # Auto-follow state for the conversation pane.
         self._follow = True
         self._scroll_settled_pending = False
-        # Per-turn streaming state.
-        self._turn_md: Markdown | None = None
-        self._turn_raw: Static | None = None
-        self._turn_raw_text = ""
-        self._turn_md_text = ""
-        self._md_over_cap = False
+        # Per-turn streaming state: bounded markdown windows (only the active
+        # one re-renders per flush) + a plain-text mirror in `transcript`.
+        self._md_windows: list[Markdown] = []
+        self._md_window_text: list[str] = []
         self._md_pending: list[str] = []
         self._md_timer: Any = None
         self._reasoning: Static | None = None
@@ -1621,11 +1650,8 @@ class HarnessTui(App):
         self.turn_finished()
 
     def _reset_turn_stream(self) -> None:
-        self._turn_md = None
-        self._turn_raw = None
-        self._turn_raw_text = ""
-        self._turn_md_text = ""
-        self._md_over_cap = False
+        self._md_windows = []
+        self._md_window_text = []
         self._md_pending = []
         self._md_timer = None
         self._reasoning = None
@@ -1633,68 +1659,104 @@ class HarnessTui(App):
         self._tool_boxes = {}
 
     def _ensure_assistant(self) -> None:
-        """Mount the '▌ kaal' label + the turn's streaming Markdown widget."""
-        if self._turn_md is not None:
+        """Mount the '▌ kaal' label + the turn's first streaming Markdown window."""
+        if self._md_windows:
             return
         self._hide_thinking()  # first content: thinking phase is over
         self.transcript.append("▌ kaal")
         self._conversation.mount(Static("▌ kaal", classes="assistant-label", markup=False))
-        self._turn_md = Markdown("", classes="assistant-md")
-        self._conversation.mount(self._turn_md)
+        win = Markdown("", classes="assistant-md")
+        self._md_windows.append(win)
+        self._md_window_text.append("")
+        self._conversation.mount(win)
         self._scroll_follow()
+
+    @property
+    def _turn_md_text(self) -> str:
+        """The turn's full markdown text (all windows, in order). Read-only:
+        the streaming path writes through the windows, not this property."""
+        return "".join(self._md_window_text)
 
     def _append_content(self, chunk: str) -> None:
         self.transcript.append(chunk)
         self._md_pending.append(chunk)
-        if self._md_timer is None:
+        if self._md_timer is not None:
+            return  # an armed timer will pick this chunk up
+        if len(chunk) < MD_INSTANT_FLUSH_CHARS:
+            # Small delta: flush synchronously — no 100 ms timer wait, so text
+            # lands ~100 ms sooner per chunk while bursts stay throttled.
+            self._flush_md()
+        else:
             self._md_timer = self.set_timer(self._md_flush_interval(), self._flush_md)
 
     def _md_flush_interval(self) -> float:
-        """Adaptive flush cadence: big markdown docs re-render at 4 Hz, not 10 Hz."""
+        """Adaptive flush cadence: long turns stream at 4 Hz, short at 10 Hz."""
         return MD_FLUSH_SECONDS if len(self._turn_md_text) < 20_000 else 0.25
 
     def _flush_md(self) -> None:
-        """Throttled markdown re-render; also the turn-end flush."""
+        """Flush the pending markdown buffer (throttled or turn-end).
+
+        Only the ACTIVE window is re-rendered; closed windows are frozen, so
+        the per-flush cost is bounded by MD_WINDOW_CHARS no matter how long
+        the turn grows.
+        """
         if self._md_timer is not None:
             self._md_timer.stop()
         self._md_timer = None
         if not self._md_pending:
             return
+        if not self._md_windows:
+            self._md_pending.clear()
+            return
         chunk = "".join(self._md_pending)
         self._md_pending.clear()
-        if self._turn_md is None:
-            return
-        if not self._md_over_cap:
-            room = MD_CHAR_CAP - len(self._turn_md_text)
-            if len(chunk) <= room:
-                self._turn_md_text += chunk
-                self._turn_md.update(self._turn_md_text)
-            else:
-                self._turn_md_text += chunk[:room]
-                self._turn_md.update(self._turn_md_text)
-                self._md_over_cap = True
-                self._turn_raw = Static(chunk[room:], classes="turn-raw", markup=False)
-                self._turn_raw_text = chunk[room:]
-                self._conversation.mount(self._turn_raw, after=self._turn_md)
-        else:
-            self._turn_raw_text += chunk
-            self._turn_raw.update(self._turn_raw_text)
+        self._append_md_chunk(chunk)
         self._scroll_follow()
 
+    def _append_md_chunk(self, chunk: str) -> None:
+        """Append streaming text to the active markdown window.
+
+        Past MD_WINDOW_CHARS the active window is closed (at the last
+        paragraph break before the cap, hard-cut otherwise) and a new window
+        is mounted after it; only the active window is ever re-rendered.
+        """
+        while chunk:
+            active = self._md_windows[-1]
+            text = self._md_window_text[-1] + chunk
+            if len(text) <= MD_WINDOW_CHARS:
+                self._md_window_text[-1] = text
+                active.update(text)
+                return
+            cut = text.rfind("\n\n", 0, MD_WINDOW_CHARS + 1)
+            if cut <= 0:
+                cut = MD_WINDOW_CHARS
+            else:
+                cut += 2  # keep the paragraph break with the closed window
+            closed, chunk = _close_md_window(text, cut)
+            self._md_window_text[-1] = closed
+            active.update(closed)
+            win = Markdown("", classes="assistant-md")
+            self._md_windows.append(win)
+            self._md_window_text.append("")
+            self._conversation.mount(win, after=active)
+
     def _close_unclosed_fence(self) -> None:
-        """Repair a code fence the model left dangling (render-side only).
+        """Repair code fences the model left dangling (render-side only).
 
         Called at turn end: split glued closing fences onto their own lines
-        and append a missing final close, so the tail of the answer isn't
-        swallowed into one literal code block. The transcript mirror keeps
-        the model's verbatim text untouched. No-op when already balanced.
+        and append missing final closes, so a window's tail isn't swallowed
+        into one literal code block. Each window is repaired independently —
+        fences crossing window boundaries were already balanced by
+        ``_close_md_window`` while streaming, and a global re-scan would
+        misread a close+open backtick run at a boundary as one longer run.
+        The transcript mirror keeps the model's verbatim text untouched.
+        No-op when everything is already balanced.
         """
-        if self._turn_md is None:
-            return
-        repaired = _repair_dangling_fence(self._turn_md_text)
-        if repaired != self._turn_md_text:
-            self._turn_md_text = repaired
-            self._turn_md.update(self._turn_md_text)
+        for i, text in enumerate(self._md_window_text):
+            repaired = _repair_dangling_fence(text)
+            if repaired != text:
+                self._md_window_text[i] = repaired
+                self._md_windows[i].update(repaired)
 
     def _append_reasoning(self, chunk: str) -> None:
         self.transcript.append(f"💭 {chunk}")
@@ -1744,7 +1806,7 @@ class HarnessTui(App):
 
     def _on_tool_start(self, call: ToolCall) -> None:
         self.transcript.append(f"⚙ {call.name}({call.arguments})")
-        box = Static(f"⚙ {call.name}({call.arguments})", classes="tool-box", markup=False)
+        box = Static(f"⚙ {call.name}({call.arguments})", classes="tool-line", markup=False)
         self._conversation.mount(box)
         trace = Static(f"⚙ {call.name}({call.arguments})", classes="trace-line", markup=False)
         self._trace.mount(trace)
@@ -1753,14 +1815,18 @@ class HarnessTui(App):
         self._scroll_follow()
 
     def _on_tool_result(self, call_id: str, content: str) -> None:
-        preview = content[:PREVIEW_CHARS] + ("…" if len(content) > PREVIEW_CHARS else "")
         glyph = "✓" if self._looks_ok(content) else "⚠"
-        self.transcript.append(f"  {glyph} {preview}")
         entry = self._tool_boxes.pop(call_id, None)
-        if entry is not None:
-            box, trace, name, args = entry
-            box.update(f"⚙ {name}({args})\n{glyph} {preview}")
-            trace.update(f"{glyph} ⚙ {name}({args}) → {preview}")
+        if entry is None:
+            return
+        box, trace, name, args = entry
+        # Compact single dim conversation line; the sidebar Trace tab keeps
+        # the detailed preview (PREVIEW_CHARS).
+        preview = content[:TOOL_PREVIEW_CHARS] + ("…" if len(content) > TOOL_PREVIEW_CHARS else "")
+        self.transcript.append(f"  {glyph} {preview}")
+        box.update(f"⚙ {name}({args}) → {glyph} {preview}")
+        trace_preview = content[:PREVIEW_CHARS] + ("…" if len(content) > PREVIEW_CHARS else "")
+        trace.update(f"{glyph} ⚙ {name}({args}) → {trace_preview}")
 
     @staticmethod
     def _looks_ok(content: str) -> bool:
@@ -1791,9 +1857,8 @@ class HarnessTui(App):
         welcome = f"kaal — {self.model_id} agent. Ask a task, or /help for commands."
         self.transcript.append(welcome)
         self._conversation.mount(Static(welcome, classes="welcome", markup=False))
-        self._conversation.mount(
-            Static("What would you like to work on?", classes="home-question", markup=False)
-        )
+        # Starter actions complete the one-line welcome; no separate question
+        # line (the decluttered empty state keeps banner + ONE welcome).
         self._conversation.mount(
             Horizontal(
                 Button("Explore repo", classes="starter-explore", compact=True),
@@ -2162,10 +2227,11 @@ class HarnessTui(App):
     # tmux-style segmented blocks. Hardcoded ANSI-safe colors that read well
     # on Textual's default dark theme (Rich Text styles cannot resolve
     # Textual $design tokens, so the block backgrounds are literals); the
-    # center segment is unstyled and inherits #status's muted CSS color. The
-    # agent block is inverted (dark text on light) so it pops from the rest.
+    # metric segments between the blocks are unstyled and inherit #status's
+    # muted CSS color. The agent block is inverted (dark text on light) so it
+    # pops from the rest. The workbench topbar owns the model/session
+    # identity, so the bar keeps only live metrics.
     _STATUS_AGENT_STYLE = "bold #1f2430 on #81a1c1"
-    _STATUS_LEFT_STYLE = "bold #d7dae0 on #1f2430"
     _STATUS_RIGHT_STYLE = "bold #eceff4 on #3b4252"
 
     def _session_short(self) -> str:
@@ -2176,23 +2242,18 @@ class HarnessTui(App):
         return self.session_id[-6:]
 
     def _status_bar(self, short_model: bool = False) -> Text:
-        """Build the tmux-style bar: agent block, left block, muted center, clock.
+        """Build the tmux-style bar: agent block, metric segments, clock.
 
         The first segment is the active agent's name (its own inverted block);
-        "—" when no agent is active. ``short_model`` is the >90-char fallback:
-        it shortens the model, drops the session suffix, and caps an over-long
-        agent name (agent names are short by design) — every metric segment
-        and the clock stay.
+        "—" when no agent is active. Model/session identity lives in the
+        workbench topbar, so the bar shows only live metrics: agent, step,
+        tok/s, cache, cost, clock. ``short_model`` is the >90-char fallback:
+        it caps an over-long agent name and drops the clock's weekday — every
+        metric segment stays.
         """
-        model = self.model_id
-        if short_model:
-            # deepseek-v4-flash -> v4-flash (last two dash chunks).
-            model = "-".join(model.split("-")[-2:])
         agent_name = self._active_agent["name"] if self._active_agent else "—"
         clock = datetime.now().strftime("%a %d %b %H:%M")
-        left = f" kaal · {model} · {self._session_short()} "
         if short_model:
-            left = f" kaal · {model} "
             # Agent names are short by design (<= the 12-char Yudhishthira);
             # the >90-char fallback also drops the clock's weekday.
             if len(agent_name) > 12:
@@ -2202,8 +2263,6 @@ class HarnessTui(App):
         cache = "cache –" if rate is None else f"cache {rate * 100:.0f}%"
         bar = Text()
         bar.append(f" {agent_name} ", style=self._STATUS_AGENT_STYLE)
-        bar.append("│")
-        bar.append(left, style=self._STATUS_LEFT_STYLE)
         bar.append("│")
         bar.append(f" step {self._steps}/{self.max_steps} ")
         bar.append("│")

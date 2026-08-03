@@ -1036,11 +1036,22 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
-    def test_large_answer_uses_raw_fallback(self):
+    def test_large_answer_windowed_markdown(self):
+        """A >20k answer streams into bounded markdown windows instead of a
+        raw-fallback block: at least 4 windows are created, the window texts
+        concatenate back to the exact answer in order, and the full tail is
+        mirrored to the transcript."""
+
         async def flow() -> None:
-            big = "x" * 12_000
+            para = "A paragraph of streaming prose for the windowed test. " * 8 + "\n\n"
+            chunk = para * 10
+            tail = para * 9 + "THE FINAL UNIQUE TAIL MARKER."
+            big = chunk * 5 + tail
+            self.assertGreater(len(big), 20_000)
             app = HarnessTui(
-                gateway=FakeGateway([("content", big), ("done", "stop")]),
+                gateway=FakeGateway(
+                    [("content", chunk)] * 5 + [("content", tail)] + [("done", "stop")]
+                ),
                 memory_root=self.root / ".agent-memory",
                 project_dir=self.root,
             )
@@ -1055,9 +1066,127 @@ class TestTui(unittest.TestCase):
                         break
                     await pilot.pause(0.05)
                 await pilot.pause()
-                # Past MD_CHAR_CAP the overflow appends via the raw block;
-                # the full answer (incl. the tail) is mirrored to the transcript.
-                self.assertIn(big[-20:], "".join(app.transcript))
+                # Windowed: >= 4 bounded markdown windows were created.
+                self.assertGreaterEqual(len(app._md_windows), 4)
+                # No raw fallback: the windows concatenate to the full answer.
+                self.assertEqual("".join(app._md_window_text), big)
+                transcript = "".join(app.transcript)
+                self.assertIn("THE FINAL UNIQUE TAIL MARKER", transcript)
+                # Content order preserved: the answer start precedes the tail.
+                self.assertLess(
+                    transcript.index(big[:20]),
+                    transcript.index("THE FINAL UNIQUE TAIL MARKER"),
+                )
+
+        asyncio.run(flow())
+
+    def test_small_chunk_instant_flush(self):
+        """Small deltas flush SYNCHRONOUSLY — no 100 ms timer wait. After a
+        short pause (well under the throttle) the answer is already rendered
+        and no flush timer is armed."""
+
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway(
+                    [("content", "hello "), ("content", "world"), ("done", "stop")]
+                ),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "say hi"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                # ~50 ms is under the 100 ms throttle: the instant-flush path
+                # must have rendered already (a timer-based flush would still
+                # be pending, with _md_timer armed).
+                await pilot.pause(0.05)
+                self.assertIn("hello world", "".join(app.transcript))
+                self.assertIsNone(app._md_timer)
+                self.assertEqual(app._md_pending, [])
+                for _ in range(200):  # let the turn finish cleanly
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+
+        asyncio.run(flow())
+
+    def test_fence_spans_markdown_windows(self):
+        """A code fence that crosses a window boundary renders contiguously:
+        every window stays balanced, all code lines land inside fence blocks,
+        and the transcript keeps the verbatim answer."""
+        from markdown_it import MarkdownIt
+
+        para = "prose paragraph " * 60 + "\n\n"
+        pre = para * 3 + "x" * 1000 + "\n"
+        body = "```\n" + "code one\n" * 20 + "\n\n" + "code two\n" * 20 + "```\n"
+        tail = para + "\n## The tail\n\nReal markdown prose at the end.\n"
+        answer = pre + body + tail
+
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway([("content", answer), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "fence"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(200):  # up to ~10s
+                    if not app.turn_active:
+                        break
+                    await pilot.pause(0.05)
+                await pilot.pause()
+                texts = app._md_window_text
+                self.assertGreaterEqual(len(texts), 2)
+                code: list[str] = []
+                for text in texts:
+                    fences = [
+                        tok
+                        for tok in MarkdownIt("commonmark").parse(text)
+                        if tok.type == "fence"
+                    ]
+                    # Each window is independently balanced (0 or 1 fence).
+                    self.assertLessEqual(len(fences), 1)
+                    code += [tok.content for tok in fences]
+                joined_code = "\n".join(code)
+                self.assertEqual(joined_code.count("code one"), 20)
+                self.assertEqual(joined_code.count("code two"), 20)
+                # The tail after the fence renders as real markdown.
+                self.assertIn("## The tail", "".join(texts))
+                # Verbatim transcript mirror keeps the whole answer.
+                self.assertIn(answer[-30:], "".join(app.transcript))
+
+        asyncio.run(flow())
+
+    def test_tool_call_renders_compact_line(self):
+        """Live tool calls render as ONE compact dim line (no bordered box):
+        '⚙ name(args) → ✓ preview' in the conversation, with the detailed
+        preview kept on the sidebar Trace tab."""
+
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                await self._submit_and_wait(app, "write hello.txt", pilot)
+                # No bordered tool boxes remain.
+                self.assertEqual(len(app.query(".tool-box")), 0)
+                tool_line = app.query_one(".tool-line", Static)
+                text = str(tool_line.render())
+                self.assertTrue(text.startswith("⚙ write("))
+                self.assertIn("→ ✓", text)
+                self.assertIn("wrote hello.txt", text)
+                # The sidebar Trace tab keeps the detailed preview line.
+                trace_lines = app.query_one("#trace").query(".trace-line")
+                self.assertGreaterEqual(len(trace_lines), 1)
+                trace_text = str(trace_lines[0].render())
+                self.assertIn("⚙ write(", trace_text)
+                self.assertIn("wrote hello.txt", trace_text)
 
         asyncio.run(flow())
 
@@ -1171,9 +1300,10 @@ class TestTui(unittest.TestCase):
         asyncio.run(flow())
 
     def test_tmux_bar_contents(self):
-        """After two scripted turns the #status bar is tmux-style: session
+        """After two scripted turns the #status bar is tmux-style: agent
         block, step/tok/s/cache/cost segments, and a formatted clock — the raw
-        full session id never appears."""
+        full session id never appears. Model/session identity lives in the
+        workbench topbar, not the bar."""
 
         async def flow() -> None:
             app = HarnessTui(
@@ -1188,7 +1318,7 @@ class TestTui(unittest.TestCase):
                 await self._submit_and_wait(app, "turn two", pilot)
                 status = str(app.query_one("#status", Static).render())
                 # The bar leads with the active agent's name (auto-activated
-                # Yudhishthira at startup), then the session/model block.
+                # Yudhishthira at startup), then the live metric segments.
                 self.assertTrue(status.lstrip().startswith("Yudhishthira"))
                 self.assertIn("step", status)
                 self.assertIn("tok/s", status)
