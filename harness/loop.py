@@ -16,6 +16,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import subprocess
+import sys
 from typing import Any, Callable
 
 from harness import prompts, sessions
@@ -44,6 +45,16 @@ from harness.tools import (
 # Prompt budget: the wire history must leave MAX_OUTPUT_TOKENS of headroom
 # for the model's reply (CONTEXT_WINDOW - MAX_OUTPUT_TOKENS == 616_000).
 PROMPT_BUDGET = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS
+
+# Tools that may run concurrently in a batch: the parallel pool is strictly
+# the read-only trio. Everything else — mutators (write/edit/bash/
+# memory_append), user interaction (ask_user: the handler blocks on stdin or
+# a TUI modal), and nested-agent spawns (spawn_agent / spawn_parallel_task:
+# each runs its own loops) — is serial in call order.
+_PARALLEL_READ_TOOLS = frozenset({"read", "grep", "glob"})
+_SERIAL_TOOLS = frozenset(
+    {"write", "edit", "bash", "memory_append", "ask_user", "spawn_agent", "spawn_parallel_task"}
+)
 
 
 class LoopError(Exception):
@@ -109,6 +120,7 @@ class AgentLoop:
         enable_verify: bool = True,
         spawn_depth: int = 1,
         agent: dict | None = None,
+        ask_handler: Callable[[str, list[str] | None], str] | None = None,
     ) -> None:
         self.gateway = gateway
         self.tools = tools
@@ -128,6 +140,10 @@ class AgentLoop:
         # loop is depth 2, and spawning is disabled at depth >= 2 (recursion
         # capped at two nested loops). See _spawn.
         self._spawn_depth = spawn_depth
+        # ask_user handler injected into the tool registry at run() start; None
+        # falls back to the headless stdin default (see _default_ask). The TUI
+        # passes a modal handler; CLI --batch passes a refusing handler.
+        self.ask_handler = ask_handler
         # Verify hook command from .kaal/hooks.json, read ONCE at run() start
         # (None = feature off: missing file, invalid JSON, empty array, or
         # enable_verify=False). Runs after any mutating batch; its output is
@@ -155,6 +171,9 @@ class AgentLoop:
         setter = getattr(self.tools, "set_spawn_handler", None)
         if setter is not None:
             setter(self._spawn)
+        many_setter = getattr(self.tools, "set_spawn_many_handler", None)
+        if many_setter is not None:
+            many_setter(self._spawn_many)
 
     # -- public --------------------------------------------------------------
 
@@ -164,6 +183,13 @@ class AgentLoop:
         self._ran = True
         self.steps = 0
         self.usage = {"input_tokens": 0, "output_tokens": 0}
+
+        # Same pattern as the spawn wiring in __init__, but ask_user needs the
+        # loop's handler choice (default stdin / CLI batch refusal / TUI modal)
+        # which is resolved here so nested loops can pass their own down.
+        ask_setter = getattr(self.tools, "set_ask_handler", None)
+        if ask_setter is not None:
+            ask_setter(self.ask_handler or self._default_ask)
 
         self._load_verify_cmd()
 
@@ -448,14 +474,18 @@ class AgentLoop:
         """Execute a tool-call batch; results recorded in original call order.
 
         All-read batches (read/grep/glob) of more than one call run
-        concurrently in a small thread pool; any batch containing a mutator
-        (write/edit/bash/memory_append) runs fully serially in call order —
-        zero file-race risk and deterministic bash side effects. tool_start
-        events are emitted first (in order) for the parallel path; on both
-        paths _record_result runs on the main thread in call order. The
-        structure refresh runs only when the batch mutated the tree.
+        concurrently in a small thread pool; every other batch — containing a
+        mutator (write/edit/bash/memory_append), ask_user (the handler blocks
+        on stdin or a modal), or a nested-agent spawn (spawn_agent /
+        spawn_parallel_task) — runs fully serially in call order: zero
+        file-race risk, deterministic side effects, no prompt contention.
+        tool_start events are emitted first (in order) for the parallel path;
+        on both paths _record_result runs on the main thread in call order.
+        The structure refresh runs only when the batch mutated the tree.
         """
-        parallel = len(calls) > 1 and all(call.name in ("read", "grep", "glob") for call in calls)
+        parallel = len(calls) > 1 and all(
+            call.name in _PARALLEL_READ_TOOLS for call in calls
+        )
         if parallel:
             if emit is not None:
                 for call in calls:
@@ -550,7 +580,25 @@ class AgentLoop:
         session_events.append({"type": "user", "data": {"content": message}})
         self._append_wire(UserMessage(message))
 
-    # -- nested agents (spawn_agent) ----------------------------------------
+    # -- nested agents (spawn_agent / spawn_parallel_task) -------------------
+
+    def _default_ask(self, question: str, options: list[str] | None = None) -> str:
+        """Headless ask_user handler: print the question, read a line from stdin.
+
+        The loop's default when no ``ask_handler`` was injected (a plain
+        ``kaal run`` at a terminal). Options are printed numbered so the user
+        can reply with a pick. Empty input — a blank line or EOF on a closed
+        stdin — becomes ``(no answer)`` so a non-interactive run never blocks
+        or crashes; it just gets a neutral answer.
+        """
+        print(f"[ask] {question}", flush=True)
+        if options:
+            for index, option in enumerate(options, 1):
+                print(f"  {index}. {option}", flush=True)
+        answer = sys.stdin.readline().strip()
+        if not answer:
+            return "(no answer)"
+        return answer
 
     def _spawn(self, task: str, dir: str | None, max_steps: int, timeout: int) -> str:
         """Run a nested AgentLoop on a sub-task; return its JSON summary.
@@ -599,6 +647,9 @@ class AgentLoop:
             allow_dangerous=False,
             enable_verify=False,
             spawn_depth=self._spawn_depth + 1,
+            # ask_user handler is inherited: a batch worker's nested agent
+            # must not block on stdin either, and a TUI modal stays a modal.
+            ask_handler=self.ask_handler,
             # no agent=: the persona is NOT inherited by nested loops — a
             # spawned sub-task runs as a plain agent, never as a second copy
             # of the active persona (see __init__).
@@ -628,3 +679,46 @@ class AgentLoop:
             },
             ensure_ascii=False,
         )
+
+    def _spawn_many(self, tasks: list[dict], timeout: int) -> str:
+        """Run several nested AgentLoops in parallel; return a JSON array.
+
+        This is the registry's injected spawn_parallel_task handler (wired in
+        __init__). Guardrails mirror :meth:`_spawn`: recursion is capped at
+        spawn_depth >= 2, and every nested run gets a FRESH ToolRegistry /
+        Memory / session on its own worker thread with a per-task wall
+        timeout, allow_dangerous=False and enable_verify=False. The batch runs
+        on up to 4 threads (one nested loop each); records are collected in
+        the ORIGINAL index order, so the parent can zip them back to its tasks.
+        A failed nested run becomes ``{"index", "error"}`` — the parent's turn
+        keeps going and the summary still parses as JSON.
+        """
+        if self._spawn_depth >= 2:
+            return "spawn_parallel_task: recursion limit reached"
+        records: list[dict] = [None] * len(tasks)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(tasks))) as pool:
+            futures: dict[concurrent.futures.Future, int] = {}
+            for index, task in enumerate(tasks):
+                task_text = task.get("task", "")
+                if not isinstance(task_text, str):
+                    task_text = str(task_text)
+                max_steps = max(1, min(int(task.get("max_steps") or 5), 5))
+                task_timeout = max(1, min(int(task.get("timeout") or timeout), 300))
+                futures[pool.submit(self._spawn, task_text, task.get("dir"), max_steps, task_timeout)] = index
+            for future in concurrent.futures.as_completed(futures):
+                index = futures[future]
+                try:
+                    raw = future.result()
+                except Exception as exc:  # noqa: BLE001 - surfaced as an error record
+                    records[index] = {"index": index, "error": str(exc)}
+                    continue
+                try:
+                    summary = json.loads(raw)
+                except (TypeError, ValueError):
+                    # _spawn returned an error string (blocked dir, timeout,
+                    # recursion) rather than a summary JSON.
+                    records[index] = {"index": index, "error": raw}
+                    continue
+                records[index] = {"index": index, **summary}
+        assert all(record is not None for record in records)
+        return json.dumps(records, ensure_ascii=False)

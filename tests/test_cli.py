@@ -152,6 +152,56 @@ class TestCli(unittest.TestCase):
         self.assertIn("cost", payload)  # estimated dollars from usage
         self.assertGreater(payload["usage"]["input_tokens"], 0)
 
+    def test_run_single_uses_default_ask_handler(self):
+        """A single `run` passes no ask_handler to the loop: run() falls back
+        to the stdin-reading default."""
+        captured = {}
+
+        class FakeAgentLoop:
+            def __init__(self, *args, **kwargs):
+                captured["ask_handler"] = kwargs.get("ask_handler")
+
+            def run(self, task, emit=None):
+                return "ok"
+
+        gateway = FakeGateway([("content", "hi"), ("done", "stop")])
+        with mock.patch("harness.cli.Gateway", return_value=gateway), mock.patch(
+            "harness.cli.AgentLoop", FakeAgentLoop
+        ):
+            code, _, _ = self._run_cli(["run", "hi", "--dir", str(self.tempdir)])
+        self.assertEqual(code, 0)
+        self.assertIsNone(captured["ask_handler"])
+
+    def test_run_batch_workers_get_refusing_ask_handler(self):
+        """--batch workers get a handler that REFUSES ask_user — a batch
+        worker must never block on stdin waiting for a user who is not there."""
+        captured = []
+        batch_file = self.tempdir / "batch.txt"
+        batch_file.write_text("one\n", encoding="utf-8")
+
+        class FakeAgentLoop:
+            def __init__(self, *args, **kwargs):
+                captured.append(kwargs.get("ask_handler"))
+
+            def run(self, task, emit=None):
+                return "ok"
+
+        gateway = FakeGateway([("content", "hi"), ("done", "stop")])
+        with mock.patch("harness.cli.Gateway", return_value=gateway), mock.patch(
+            "harness.cli.AgentLoop", FakeAgentLoop
+        ):
+            code, _, _ = self._run_cli(
+                ["run", "--batch", str(batch_file), "--dir", str(self.tempdir)]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(captured), 1)
+        handler = captured[0]
+        self.assertIsNotNone(handler)
+        self.assertEqual(
+            handler("a question", ["yes", "no"]),
+            "ask_user: not available in batch mode",
+        )
+
     # -- run flags (tool cache / verify) -------------------------------------
 
     def test_run_no_tool_cache_and_no_verify_reach_constructed_objects(self):

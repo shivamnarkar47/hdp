@@ -120,12 +120,19 @@ class ToolRegistry:
             "bash": self._tool_bash,
             "memory_append": self._tool_memory_append,
             "spawn_agent": self._tool_spawn_agent,
+            "ask_user": self._tool_ask_user,
+            "spawn_parallel_task": self._tool_spawn_parallel_task,
         }
-        # Nested-agent runner injected by AgentLoop after construction
+        # Nested-agent runners injected by AgentLoop after construction
         # (Finding 6: cli.py builds the registry before the loop). None when
-        # the registry is used standalone — spawn_agent then returns an error
-        # string instead of running anything.
+        # the registry is used standalone — spawn_agent / spawn_parallel_task
+        # then return an error string instead of running anything.
         self._spawn_handler: Callable[[str, str | None, int, int], str] | None = None
+        self._spawn_many_handler: Callable[[list[dict[str, Any]], int], str] | None = None
+        # ask_user answer provider injected by AgentLoop (default: read stdin).
+        # None when the registry is used standalone — ask_user then returns an
+        # error string instead of blocking.
+        self._ask_handler: Callable[[str, list[str] | None], str] | None = None
 
     @property
     def project_dir(self) -> Path:
@@ -142,6 +149,30 @@ class ToolRegistry:
         ``spawn_agent: not available in this context``.
         """
         self._spawn_handler = handler
+
+    def set_spawn_many_handler(
+        self, handler: Callable[[list[dict[str, Any]], int], str] | None
+    ) -> None:
+        """Inject the parallel nested-agent runner used by spawn_parallel_task.
+
+        Mirrors :meth:`set_spawn_handler`: AgentLoop wires its own
+        ``_spawn_many`` after construction. Without a handler — a standalone
+        registry — spawn_parallel_task returns
+        ``spawn_parallel_task: not available in this context``.
+        """
+        self._spawn_many_handler = handler
+
+    def set_ask_handler(
+        self, handler: Callable[[str, list[str] | None], str] | None
+    ) -> None:
+        """Inject the ask_user answer provider (the user-in-the-loop tool).
+
+        AgentLoop wires this in ``run()`` with its default headless handler
+        (print the question, read a line from stdin) or the caller's handler
+        (CLI batch: refuse; TUI: a modal). Without a handler — a standalone
+        registry — ask_user returns ``ask_user: not available in this context``.
+        """
+        self._ask_handler = handler
 
     def schemas(self) -> list[dict]:
         """OpenAI function-call schemas for every tool.
@@ -617,6 +648,69 @@ class ToolRegistry:
         timeout = max(1, min(int(timeout), 300))
         return self._spawn_handler(task, args.get("dir"), max_steps, timeout)
 
+    def _tool_ask_user(self, args: dict[str, Any]) -> str:
+        tool = "ask_user"
+        question = self._require(args, "question", tool)
+        if not isinstance(question, str):
+            question = str(question)
+        if self._ask_handler is None:
+            return "ask_user: not available in this context"
+        options = args.get("options")
+        if options is not None and (
+            not isinstance(options, list)
+            or not all(isinstance(option, str) for option in options)
+        ):
+            raise ToolError(f"{tool}: options must be an array of strings")
+        return str(self._ask_handler(question, options))
+
+    def _tool_spawn_parallel_task(self, args: dict[str, Any]) -> str:
+        tool = "spawn_parallel_task"
+        tasks = self._require(args, "tasks", tool)
+        if not isinstance(tasks, list) or not tasks:
+            raise ToolError(f"{tool}: tasks must be a non-empty array")
+        if self._spawn_many_handler is None:
+            return "spawn_parallel_task: not available in this context"
+        timeout = self._int_arg(args, "timeout", tool, default=120) or 120
+        timeout = max(1, min(int(timeout), 300))
+        clean: list[dict[str, Any]] = []
+        for index, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                raise ToolError(f"{tool}: tasks[{index}] must be an object")
+            task_text = task.get("task")
+            if not isinstance(task_text, str) or not task_text:
+                raise ToolError(f"{tool}: tasks[{index}]: missing required argument: task")
+            max_steps = task.get("max_steps")
+            if max_steps is not None:
+                try:
+                    max_steps = int(max_steps)
+                except (TypeError, ValueError):
+                    raise ToolError(
+                        f"{tool}: tasks[{index}]: invalid max_steps: {max_steps!r}"
+                    ) from None
+                max_steps = max(1, min(max_steps, 5))
+            else:
+                max_steps = 5
+            task_timeout = task.get("timeout")
+            if task_timeout is not None:
+                try:
+                    task_timeout = int(task_timeout)
+                except (TypeError, ValueError):
+                    raise ToolError(
+                        f"{tool}: tasks[{index}]: invalid timeout: {task_timeout!r}"
+                    ) from None
+                task_timeout = max(1, min(task_timeout, 300))
+            else:
+                task_timeout = timeout
+            clean.append(
+                {
+                    "task": task_text,
+                    "dir": task.get("dir"),
+                    "max_steps": max_steps,
+                    "timeout": task_timeout,
+                }
+            )
+        return self._spawn_many_handler(clean, timeout)
+
 
 # -- schemas ----------------------------------------------------------------
 
@@ -791,6 +885,78 @@ _TOOL_SPECS: list[tuple[str, str, dict[str, Any]]] = [
                 },
             },
             "required": ["task"],
+        },
+    ),
+    (
+        "ask_user",
+        "Ask the user a question and wait for their answer. Use when you need a "
+        "decision, a confirmation, or information only the user has. The answer "
+        "is returned as the tool result.",
+        {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The question to ask the user.",
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional choices; when given, the user picks one.",
+                },
+            },
+            "required": ["question"],
+        },
+    ),
+    (
+        "spawn_parallel_task",
+        "Run several independent sub-tasks in parallel as nested kaal agents. "
+        "Each task: {task: string, dir?: string, max_steps?: int (1-5), "
+        "timeout?: int (1-300)}. Returns a JSON array of "
+        "{index, answer, steps, usage, session_id, error?}.",
+        {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "Sub-tasks to run concurrently; results come back in this order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "The sub-task for the nested agent.",
+                            },
+                            "dir": {
+                                "type": "string",
+                                "description": "Sub-project directory for the nested agent (default: the "
+                                "current project directory; escaping paths are blocked).",
+                            },
+                            "max_steps": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 5,
+                                "description": "Maximum turns for the nested agent (default: 5).",
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 300,
+                                "description": "Wall-clock seconds before the nested run is abandoned "
+                                "(default: the tool-level timeout).",
+                            },
+                        },
+                        "required": ["task"],
+                    },
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300,
+                    "description": "Default per-task wall-clock seconds (default: 120).",
+                },
+            },
+            "required": ["tasks"],
         },
     ),
 ]

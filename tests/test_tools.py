@@ -150,7 +150,10 @@ class TestToolRegistry(unittest.TestCase):
         names = {schema["function"]["name"] for schema in self.reg.schemas()}
         self.assertEqual(
             names,
-            {"read", "grep", "glob", "write", "edit", "bash", "memory_append", "spawn_agent"},
+            {
+                "read", "grep", "glob", "write", "edit", "bash", "memory_append",
+                "spawn_agent", "ask_user", "spawn_parallel_task",
+            },
         )
         for schema in self.reg.schemas():
             self.assertEqual(schema["type"], "function")
@@ -208,6 +211,120 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(calls, [("t", None, 5, 300)])
         self.reg.execute("spawn_agent", {"task": "t", "max_steps": 0, "timeout": 0})
         self.assertEqual(calls[-1], ("t", None, 1, 1))
+
+    def test_ask_user_without_handler(self):
+        result = self.reg.execute("ask_user", {"question": "Continue?"})
+        self.assertEqual(result, "ask_user: not available in this context")
+
+    def test_ask_user_with_stub_handler(self):
+        calls = []
+
+        def handler(question, options=None):
+            calls.append((question, options))
+            return "yes"
+
+        self.reg.set_ask_handler(handler)
+        result = self.reg.execute(
+            "ask_user", {"question": "Continue?", "options": ["yes", "no"]}
+        )
+        self.assertEqual(result, "yes")
+        self.assertEqual(calls, [("Continue?", ["yes", "no"])])
+
+    def test_ask_user_options_default_none(self):
+        self.reg.set_ask_handler(lambda question, options=None: f"{question} / {options}")
+        result = self.reg.execute("ask_user", {"question": "Continue?"})
+        self.assertEqual(result, "Continue? / None")
+
+    def test_ask_user_options_must_be_string_array(self):
+        self.reg.set_ask_handler(lambda question, options=None: "ok")
+        result = self.reg.execute("ask_user", {"question": "q", "options": [1, 2]})
+        self.assertTrue(result.startswith("ask_user: options must be an array of strings"))
+
+    def test_spawn_parallel_task_without_handler(self):
+        result = self.reg.execute(
+            "spawn_parallel_task", {"tasks": [{"task": "do the thing"}]}
+        )
+        self.assertEqual(result, "spawn_parallel_task: not available in this context")
+
+    def test_spawn_parallel_task_with_stub_many_handler(self):
+        calls = []
+
+        def many_handler(tasks, timeout):
+            calls.append((tasks, timeout))
+            return json.dumps(
+                [{"index": 0, "answer": "done", "steps": 1, "usage": {}, "session_id": "m-1"}]
+            )
+
+        self.reg.set_spawn_many_handler(many_handler)
+        result = self.reg.execute(
+            "spawn_parallel_task",
+            {
+                "tasks": [{"task": "a", "max_steps": 3, "timeout": 42}, {"task": "b"}],
+                "timeout": 99,
+            },
+        )
+        self.assertEqual(json.loads(result)[0]["answer"], "done")
+        # Tasks are normalized: defaults filled in, out-of-range clamped.
+        self.assertEqual(
+            calls[0][0][0], {"task": "a", "dir": None, "max_steps": 3, "timeout": 42}
+        )
+        self.assertEqual(
+            calls[0][0][1], {"task": "b", "dir": None, "max_steps": 5, "timeout": 99}
+        )
+        self.assertEqual(calls[0][1], 99)
+
+    def test_spawn_parallel_task_clamps_per_task(self):
+        calls = []
+        self.reg.set_spawn_many_handler(
+            lambda tasks, timeout: calls.append((tasks, timeout)) or "[]"
+        )
+        self.reg.execute(
+            "spawn_parallel_task",
+            {"tasks": [{"task": "a", "max_steps": 99, "timeout": 9999}]},
+        )
+        self.assertEqual(
+            calls[0][0][0], {"task": "a", "dir": None, "max_steps": 5, "timeout": 300}
+        )
+        self.assertEqual(calls[0][1], 120)  # tool-level default
+
+    def test_spawn_parallel_task_requires_nonempty_array(self):
+        self.reg.set_spawn_many_handler(lambda tasks, timeout: "[]")
+        result = self.reg.execute("spawn_parallel_task", {"tasks": []})
+        self.assertTrue(result.startswith("spawn_parallel_task: tasks must be a non-empty array"))
+        result = self.reg.execute("spawn_parallel_task", {"tasks": "nope"})
+        self.assertTrue(result.startswith("spawn_parallel_task: tasks must be a non-empty array"))
+
+    def test_spawn_parallel_task_requires_task_in_each(self):
+        self.reg.set_spawn_many_handler(lambda tasks, timeout: "[]")
+        result = self.reg.execute("spawn_parallel_task", {"tasks": [{"max_steps": 2}]})
+        self.assertTrue(
+            result.startswith("spawn_parallel_task: tasks[0]: missing required argument: task")
+        )
+
+    def test_ask_user_schema(self):
+        schema = next(
+            s for s in self.reg.schemas() if s["function"]["name"] == "ask_user"
+        )
+        params = schema["function"]["parameters"]
+        self.assertEqual(params["required"], ["question"])
+        self.assertEqual(params["properties"]["options"]["type"], "array")
+        self.assertEqual(params["properties"]["options"]["items"]["type"], "string")
+
+    def test_spawn_parallel_task_schema(self):
+        schema = next(
+            s
+            for s in self.reg.schemas()
+            if s["function"]["name"] == "spawn_parallel_task"
+        )
+        params = schema["function"]["parameters"]
+        self.assertEqual(params["required"], ["tasks"])
+        self.assertEqual(params["properties"]["timeout"]["maximum"], 300)
+        self.assertIn("error", schema["function"]["description"])
+        items = params["properties"]["tasks"]["items"]
+        self.assertEqual(items["type"], "object")
+        self.assertEqual(items["required"], ["task"])
+        self.assertEqual(items["properties"]["max_steps"]["maximum"], 5)
+        self.assertEqual(items["properties"]["timeout"]["maximum"], 300)
 
 
     def test_read_range_on_huge_file(self):
@@ -315,7 +432,7 @@ class TestToolRegistry(unittest.TestCase):
         second = self.reg.schemas()
         self.assertEqual(first, second)
         self.assertIsNot(first, second)  # shallow copy: distinct list object
-        self.assertEqual(len(first), 8)
+        self.assertEqual(len(first), 10)  # read/grep/glob/write/edit/bash/memory_append/spawn_agent/ask_user/spawn_parallel_task
         for inner_first, inner_second in zip(first, second):
             self.assertIs(inner_first, inner_second)  # memoized inner dicts
 

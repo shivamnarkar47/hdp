@@ -34,15 +34,28 @@ DSML_WRITE = (
 
 
 class FakeGateway:
-    """Yields pre-scripted StreamEvents; records every stream() invocation."""
+    """Yields pre-scripted StreamEvents; records every stream() invocation.
+
+    Thread-safe (a lock guards the script queue and the call log) so
+    concurrent nested loops — spawn_parallel_task — can share one gateway.
+    A ``("sleep", seconds)`` pseudo-event pauses the stream mid-script, so a
+    script can stretch its wall time for parallelism assertions.
+    """
 
     def __init__(self, *scripts):
         self.scripts = list(scripts)
         self.calls = []  # (messages, tools) per stream() call
+        self._lock = threading.Lock()
 
     def stream(self, messages, tools):
-        self.calls.append((messages, tools))
-        yield from self.scripts.pop(0)
+        with self._lock:
+            self.calls.append((messages, tools))
+            script = self.scripts.pop(0)
+        for event in script:
+            if isinstance(event, tuple) and len(event) == 2 and event[0] == "sleep":
+                time.sleep(event[1])
+                continue
+            yield event
 
 
 class StubRegistry:
@@ -50,7 +63,9 @@ class StubRegistry:
 
     `record` gets (name, path_or_None, thread_name) per execution, in execution
     order. Reads with a path in `fail_reads` raise ToolError (a tool failure
-    that counts toward the consecutive-failure budget).
+    that counts toward the consecutive-failure budget). ask_user is answered
+    by the loop-injected handler (set_ask_handler), mirroring the real
+    registry contract.
     """
 
     def __init__(self, project_dir, read_delay=0.0, fail_reads=()):
@@ -58,6 +73,7 @@ class StubRegistry:
         self._read_delay = read_delay
         self._fail_reads = set(fail_reads)
         self.record = []
+        self._ask_handler = None
 
     def schemas(self):
         return []
@@ -68,6 +84,9 @@ class StubRegistry:
 
     def end_batch(self, mutated):
         pass
+
+    def set_ask_handler(self, handler):
+        self._ask_handler = handler
 
     def execute(self, name, args):
         thread = threading.current_thread().name
@@ -85,6 +104,10 @@ class StubRegistry:
             return "no matches"
         if name == "glob":
             return "[]"
+        if name == "ask_user":
+            if self._ask_handler is None:
+                return "ask_user: not available in this context"
+            return self._ask_handler(args.get("question"), args.get("options"))
         raise ToolError(f"unknown tool: {name}")
 
 
@@ -822,6 +845,208 @@ class TestAgentLoop(unittest.TestCase):
         loop.run("spawn")
         results = [r for r in read_events(self.session_id) if r["type"] == "tool_result"]
         self.assertTrue(results[0]["data"]["content"].startswith("spawn_agent: not a directory:"))
+
+    # -- ask_user -----------------------------------------------------------
+
+    def test_ask_user_flow(self):
+        """Turn 1 calls ask_user (with options); the injected handler's answer
+        becomes the tool result and reaches turn 2's wire verbatim."""
+        ask_call = [
+            (
+                "tool_call",
+                ToolCall(
+                    "a1",
+                    "ask_user",
+                    '{"question": "Proceed?", "options": ["yes", "no"]}',
+                ),
+            ),
+            ("done", "tool_calls"),
+        ]
+        final = [("content", "Proceeding with your answer."), ("done", "stop")]
+        gateway = FakeGateway(ask_call, final)
+        calls = []
+        loop = AgentLoop(
+            gateway,
+            self.tools,
+            self.memory,
+            self.session_id,
+            ask_handler=lambda question, options=None: calls.append((question, options))
+            or "yes",
+        )
+        events: list = []
+        answer = loop.run("ask", emit=events.append)
+        self.assertEqual(answer, "Proceeding with your answer.")
+        # The handler got the question AND the options, once.
+        self.assertEqual(calls, [("Proceed?", ["yes", "no"])])
+        # The tool result is the handler's answer.
+        results = [e[2] for e in events if e[0] == "tool_result"]
+        self.assertEqual(results, ["yes"])
+        # Turn 2's wire carries the tool result (the model sees it).
+        history = gateway.calls[1][0]
+        tool_msgs = [m for m in history if m["role"] == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertEqual(tool_msgs[0]["tool_call_id"], "a1")
+        self.assertEqual(tool_msgs[0]["content"], "yes")
+
+    def test_ask_user_in_batch_runs_serially(self):
+        """A batch [read, ask_user, read] runs serially in call order: the
+        ask handler blocks on stdin/a modal, so it must never sit in the
+        parallel read pool (execution order == call order, one thread)."""
+        turn1 = [
+            ("tool_call", ToolCall("c1", "read", '{"path": "a.txt"}')),
+            ("tool_call", ToolCall("c2", "ask_user", '{"question": "Go?"}')),
+            ("tool_call", ToolCall("c3", "read", '{"path": "c.txt"}')),
+            ("done", "tool_calls"),
+        ]
+        turn2 = [("content", "done"), ("done", "stop")]
+        gateway = FakeGateway(turn1, turn2)
+        stub = StubRegistry(self.tempdir)
+        asked = []
+        loop = AgentLoop(
+            gateway,
+            stub,
+            self.memory,
+            self.session_id + "-askserial",
+            ask_handler=lambda question, options=None: asked.append(question) or "yes",
+        )
+        events: list = []
+        loop.run("ask batch", emit=events.append)
+        # Serial: execution order == call order, on one (main) thread.
+        self.assertEqual(
+            [(r[0], r[1]) for r in stub.record],
+            [("read", "a.txt"), ("ask_user", None), ("read", "c.txt")],
+        )
+        self.assertEqual(len({r[2] for r in stub.record}), 1)
+        self.assertEqual(asked, ["Go?"])
+        # Emit interleaving preserved: start/result alternate per call.
+        filtered = []
+        for e in events:
+            if e[0] == "tool_start":
+                filtered.append((e[0], e[1].id))
+            elif e[0] == "tool_result":
+                filtered.append((e[0], e[1]))
+        self.assertEqual(
+            filtered,
+            [
+                ("tool_start", "c1"), ("tool_result", "c1"),
+                ("tool_start", "c2"), ("tool_result", "c2"),
+                ("tool_start", "c3"), ("tool_result", "c3"),
+            ],
+        )
+
+    # -- spawn_parallel_task ------------------------------------------------
+
+    def test_spawn_parallel_task_two_nested_loops(self):
+        """spawn_parallel_task runs 2 nested loops CONCURRENTLY: the tool
+        result is a JSON array of 2 records in index order, both nested
+        sessions are persisted in the isolated store, and wall time is
+        ~max, not the serial sum."""
+        delay = 0.4
+
+        # Baseline: ONE nested spawn (serial _spawn path) with the same delay.
+        single_call = [
+            ("tool_call", ToolCall("s1", "spawn_agent", '{"task": "single"}')),
+            ("done", "tool_calls"),
+        ]
+        single_nested = [("sleep", delay), ("content", "nested"), ("done", "stop")]
+        single_final = [("content", "single done"), ("done", "stop")]
+        single_gateway = FakeGateway(single_call, single_nested, single_final)
+        t0 = time.monotonic()
+        AgentLoop(
+            single_gateway, self.tools, self.memory, self.session_id + "-single"
+        ).run("single")
+        single_time = time.monotonic() - t0
+
+        parent_call = [
+            (
+                "tool_call",
+                ToolCall(
+                    "p1",
+                    "spawn_parallel_task",
+                    '{"tasks": [{"task": "task one"}, {"task": "task two"}]}',
+                ),
+            ),
+            ("done", "tool_calls"),
+        ]
+        nested_one = [("sleep", delay), ("content", "nested one"), ("done", "stop")]
+        nested_two = [("sleep", delay), ("content", "nested two"), ("done", "stop")]
+        parent_final = [("content", "parent done"), ("done", "stop")]
+        gateway = FakeGateway(parent_call, nested_one, nested_two, parent_final)
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
+        t0 = time.monotonic()
+        answer = loop.run("parallel spawn")
+        parallel_time = time.monotonic() - t0
+        self.assertEqual(answer, "parent done")
+        # Parallel: a serial 2-spawn run would take ~2x the single-spawn time;
+        # require the parallel batch to stay well under that.
+        self.assertLess(parallel_time, 1.8 * single_time)
+
+        parent_events = read_events(self.session_id)
+        spawn_results = [
+            r for r in parent_events if r["type"] == "tool_result"
+        ]
+        self.assertEqual(len(spawn_results), 1)
+        records = json.loads(spawn_results[0]["data"]["content"])
+        self.assertIsInstance(records, list)
+        self.assertEqual(len(records), 2)
+        # Records are in the ORIGINAL index order.
+        self.assertEqual([r["index"] for r in records], [0, 1])
+        # Both answers present (which lands where is racy across threads).
+        self.assertEqual(
+            sorted(r["answer"] for r in records), ["nested one", "nested two"]
+        )
+        for record in records:
+            self.assertNotIn("error", record)
+            self.assertGreater(record["steps"], 0)
+            self.assertIn("usage", record)
+            self.assertIn("session_id", record)
+            # Nested sessions persisted in the isolated store.
+            self.assertNotEqual(read_events(record["session_id"]), [])
+
+    def test_spawn_parallel_task_recursion_limit(self):
+        """A spawn_parallel_task INSIDE the nested loop (depth 2) returns the
+        limit string: no further loops are created (four stream calls total),
+        and the parent still gets a JSON array record."""
+        parent_call = [
+            (
+                "tool_call",
+                ToolCall("p1", "spawn_parallel_task", '{"tasks": [{"task": "outer"}]}'),
+            ),
+            ("done", "tool_calls"),
+        ]
+        nested_call = [
+            (
+                "tool_call",
+                ToolCall("p2", "spawn_parallel_task", '{"tasks": [{"task": "inner"}]}'),
+            ),
+            ("done", "tool_calls"),
+        ]
+        nested_final = [("content", "nested done"), ("done", "stop")]
+        parent_final = [("content", "parent done"), ("done", "stop")]
+        gateway = FakeGateway(parent_call, nested_call, nested_final, parent_final)
+        loop = AgentLoop(gateway, self.tools, self.memory, self.session_id)
+        answer = loop.run("parallel twice")
+        self.assertEqual(answer, "parent done")
+        self.assertEqual(len(gateway.calls), 4)  # no third loop ran
+        self.assertEqual(gateway.scripts, [])
+
+        parent_events = read_events(self.session_id)
+        spawn_results = [
+            r for r in parent_events if r["type"] == "tool_result"
+        ]
+        self.assertEqual(len(spawn_results), 1)
+        records = json.loads(spawn_results[0]["data"]["content"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["answer"], "nested done")
+        nested_sid = records[0]["session_id"]
+        # The nested loop's own spawn_parallel_task result is the limit string.
+        nested_events = read_events(nested_sid)
+        inner_results = [r for r in nested_events if r["type"] == "tool_result"]
+        self.assertEqual(len(inner_results), 1)
+        self.assertEqual(
+            inner_results[0]["data"]["content"],
+            "spawn_parallel_task: recursion limit reached",
+        )
 
 
 if __name__ == "__main__":

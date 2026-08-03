@@ -144,16 +144,22 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
-def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
+def _run_one(
+    prompt: str, args: argparse.Namespace, session_id: str, ask_handler=None
+) -> dict:
     """Run one prompt through the full per-run machinery; return its record.
 
     Shared by the single-run path and every ``--batch`` worker. ``session_id``
     is chosen by the caller (single run: ``--resume`` or a fresh id; batch:
-    one fresh id per task — microsecond-precision, collision-free). Returns
-    the success record ``{session_id, answer, steps, tool_calls, usage}`` or
-    an error record ``{session_id, error, error_kind}`` where ``error_kind``
-    is one of "config" | "gateway" | "loop" | "agent" (config/gateway/agent
-    -> exit 1, loop -> exit 2, matching the pre-refactor single-run behavior).
+    one fresh id per task — microsecond-precision, collision-free).
+    ``ask_handler`` is the ask_user answer provider: None (single run) falls
+    back to the loop's stdin-reading default; batch workers pass
+    :func:`_batch_ask`, which refuses — a batch worker must never block on
+    stdin. Returns the success record ``{session_id, answer, steps,
+    tool_calls, usage}`` or an error record ``{session_id, error,
+    error_kind}`` where ``error_kind`` is one of "config" | "gateway" |
+    "loop" | "agent" (config/gateway/agent -> exit 1, loop -> exit 2,
+    matching the pre-refactor single-run behavior).
     """
     try:
         key = config.get_api_key()
@@ -197,6 +203,7 @@ def _run_one(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
         resume=bool(args.resume),
         enable_verify=not args.no_verify,
         agent=agent,
+        ask_handler=ask_handler,
     )
     tool_calls = 0
 
@@ -270,11 +277,22 @@ def _read_batch_prompts(path: str) -> list[str]:
     return [prompt for prompt in prompts if prompt]
 
 
+def _batch_ask(question: str, options: list[str] | None = None) -> str:
+    """ask_user handler for --batch workers: refuse, never block on stdin.
+
+    A batch worker has no user attached to its terminal (workers are pool
+    threads); blocking on stdin would hang the whole batch until the per-task
+    wall timeout. The refusal string is a normal tool result — the model sees
+    it and carries on.
+    """
+    return "ask_user: not available in batch mode"
+
+
 def _batch_task(prompt: str, args: argparse.Namespace, session_id: str) -> dict:
     """One --batch worker: announce the task, then run it via _run_one."""
     if not args.json:
         print(f"--- {session_id} ---", flush=True)
-    return _run_one(prompt, args, session_id)
+    return _run_one(prompt, args, session_id, ask_handler=_batch_ask)
 
 
 def _run_batch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
