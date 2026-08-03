@@ -281,6 +281,8 @@ class TestPrompts(unittest.TestCase):
         self.assertIn(project, prompt)
         self.assertIn(FIXED_PREFIX, prompt)
         self.assertLessEqual(estimate_tokens(FIXED_PREFIX), 8000)
+        # Voice & Output Doctrine marker.
+        self.assertIn("Mahabharata", prompt)
 
 
 if __name__ == "__main__":

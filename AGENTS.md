@@ -1,10 +1,10 @@
 # AGENTS.md — kaal (`kaal`)
 
-> **Durable anchor memory.** The first 200 lines of this file are auto-injected into every kaal agent's system prompt (`harness/prompts.py` → `build_project_context`), so the top is the highest-signal content. Dynamic state lives in `.agent-memory/` (see §6).
+> **Durable anchor memory.** This file is the stable ground of the harness: its first 200 lines are carried, whole, into every kaal agent's system prompt (`harness/prompts.py` → `build_project_context`). What endures belongs at the top; what changes from day to day belongs in `.agent-memory/` (see §6), not here.
 
 ## TL;DR / 30-Second Orientation
 
-**What this is:** `kaal`, a stdlib-only Python agent harness running **DeepSeek V4 Flash** with tools, persistent memory, sessions, and a Textual TUI. Only dependency: `textual`, used ONLY by the TUI.
+**What this is:** `kaal` is a Python agent harness, built on the standard library alone, that runs **DeepSeek V4 Flash** with tools, persistent memory, sessions, and a Textual TUI. Its only dependency is `textual`, and that one library serves the TUI and nothing else.
 
 **Get productive immediately:**
 - `kaal` — launch the Textual TUI (default surface; requires an API key)
@@ -13,8 +13,8 @@
 - `.venv/bin/python -m unittest discover -s tests -v` — all 200+ unit tests (stdlib unittest)
 
 **GOTCHA: the two hard things (know these before touching anything):**
-1. **DSML healing.** The model emits tool calls as a DSML XML envelope (`<｜DSML｜tool_calls>`, fullwidth pipe **U+FF5C**) that leaks into visible `delta.content` instead of arriving as structured `tool_calls`. `harness/dialect.py` `DialectFeed` heals it incrementally and strips leaked chat-template tokens (`<｜begin▁of▁sentence｜>`, `<｜Assistant｜>`, …). When both arrive, **structured tool_calls win** over healed ones (`loop.py`).
-2. **`reasoning_content` replay.** Assistant turns that made tool calls MUST re-send their streamed `reasoning_content` verbatim on the next request, or the gateway **400s on turn 2+**. `harness/messages.py` `AssistantMessage.to_wire()` always replays it. NEVER synthesize a placeholder.
+1. **DSML healing.** The model does not deliver its tool calls cleanly. It emits them as a DSML XML envelope (`<｜DSML｜tool_calls>`, fullwidth pipe **U+FF5C**) that leaks into visible `delta.content` instead of arriving as structured `tool_calls`. `harness/dialect.py` `DialectFeed` heals it incrementally and strips leaked chat-template tokens (`<｜begin▁of▁sentence｜>`, `<｜Assistant｜>`, …). When both arrive, **structured tool_calls win** over healed ones (`loop.py`).
+2. **`reasoning_content` replay.** When an assistant turn has made tool calls, the next request MUST carry that turn's streamed `reasoning_content` verbatim; otherwise the gateway **400s on turn 2+**. `harness/messages.py` `AssistantMessage.to_wire()` always replays it. NEVER synthesize a placeholder.
 
 ## Table of Contents
 
@@ -32,7 +32,7 @@
 
 ## 0. Voice & Output Doctrine
 
-*Purpose: how every kaal agent speaks and structures answers. Non-negotiable — applies to every reply.*
+*Purpose: the law of speech and structure for every kaal agent. Non-negotiable — it binds every reply.*
 
 **Epic voice, plain English.** Answer in the measured, dignified cadence of the Mahabharata era — declarative, deliberate, timeless — but in proper, modern English. NEVER pseudo-archaic: no "thou", "doth", "hath", no inverted word order, no thee/thou flourishes. The epic tone is a thin veneer; technical precision and clarity always come first. Short answers stay short; the cadence shapes the delivery, never the content.
 
@@ -49,11 +49,13 @@
 9. Cap lists at 5; split do-now vs later when longer.
 10. No preamble, no recap, no closing pleasantries. Start with the answer; end when it is done.
 
+**Pre-send check.** Before sending, delete: an announcing opener, a recapping closer, any "by the way" sidebar, hedging adverbs that add no information ("perhaps", "might", "could possibly"), and idioms — state the literal action instead. Then confirm: a reader who sees only the first line and the last line knows what to do next and what just happened. If not, revise; then send.
+
 When the epic voice and the skill's brevity rules conflict, the skill's shape wins — the voice colors the words, the skill shapes the structure. These rules outrank personal style and persist for the whole session.
 
 ## 1. Commands
 
-*Purpose: every real command, copy-paste verified against the installed CLI.*
+*Purpose: every real command, verified against the installed CLI — copy, paste, and it runs.*
 
 | Command | What it does |
 |---|---|
@@ -68,7 +70,7 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 | `kaal --version` | Print `kaal 0.1.0` and exit |
 | `.venv/bin/python -m unittest discover -s tests -v` | All unit tests |
 
-`kaal run -` reads the prompt from stdin instead of `"PROMPT"` (useful for pipes).
+`kaal run -` reads the prompt from stdin in place of `"PROMPT"` — the route for piped input.
 
 **`kaal run` flags** (from `--help`):
 
@@ -90,9 +92,9 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 
 **Exit codes:** `0` answer produced · `1` config/key/gateway error · `2` loop error (max steps, context overflow, tool loop, 5 consecutive tool failures).
 
-**API key:** env `OPENCODE_API_KEY`, else the user key store `~/.config/kaal/api_key` (0600; saved from the TUI via `/connect`), else omp auth store `~/.omp/agent/agent.db` (read-only sqlite), else exit 1 with instructions. Never cache or write it outside `config.save_user_api_key`.
+**API key:** the key is sought in this order: env `OPENCODE_API_KEY`, then the user key store `~/.config/kaal/api_key` (0600; saved from the TUI via `/connect`), then the omp auth store `~/.omp/agent/agent.db` (read-only sqlite), and failing all of these, exit 1 with instructions. Never cache or write it outside `config.save_user_api_key`.
 
-**Sessions:** JSONL at `~/.local/share/kaal/sessions/` (override: env `KAAL_SESSIONS_DIR`). Id format `%Y%m%d-%H%M%S` (`sessions.py`).
+**Sessions:** each session is a JSONL record at `~/.local/share/kaal/sessions/` (override: env `KAAL_SESSIONS_DIR`). The id takes the form `%Y%m%d-%H%M%S` (`sessions.py`).
 
 **TUI slash commands** (`tui.py`):
 
@@ -108,13 +110,13 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 | `/verbose` | toggle reasoning display |
 | `/quit` | exit |
 
-**TUI keys:** `Ctrl+C` cancels the running turn (cooperative) · `Ctrl+Q` quits · `up`/`down` walk prompt history. The TUI's font is terminal-side, not app-side: configure the emulator (Fira Sans Condensed; see `docs/terminal-setup.md`).
+**TUI keys:** `Ctrl+C` cancels the running turn (cooperative) · `Ctrl+Q` quits · `up`/`down` walk prompt history. The font the TUI shows is the terminal's own, not the app's: configure the emulator (Fira Sans Condensed; see `docs/terminal-setup.md`).
 
 ## 2. Architecture
 
-*Purpose: the shape of the code in plain text — layering, data flow, no diagram.*
+*Purpose: how the code is shaped, told in plain words — the layering, the flow of data, no diagram.*
 
-**Data flow (one `kaal run`):** `cli.py` builds `Gateway` + `Memory` + `ToolRegistry` + `AgentLoop` → `loop.run(prompt, emit)`. Per turn: `to_wire_messages()` → `gateway.stream()` (SSE) → `DialectFeed` heals DSML out of `content` deltas → resolved `ToolCall`s → `ToolRegistry.execute()` → result appended as a tool message and persisted to the session JSONL → repeat until the model answers (no tool calls) or `max_steps`.
+**Data flow (one `kaal run`):** the road of a single run is fixed. `cli.py` builds `Gateway` + `Memory` + `ToolRegistry` + `AgentLoop`, then calls `loop.run(prompt, emit)`. Each turn follows the same road: `to_wire_messages()` → `gateway.stream()` (SSE) → `DialectFeed` heals DSML out of `content` deltas → resolved `ToolCall`s → `ToolRegistry.execute()` → the result is appended as a tool message and persisted to the session JSONL → and so it repeats until the model answers with no tool calls, or `max_steps` is spent.
 
 **Layering:**
 - **Core — stdlib-only, ports 1:1 to Rust/Go:** `config.py`, `gateway.py`, `dialect.py`, `messages.py`, `context.py`, `loop.py`. No new dependencies, ever.
@@ -134,11 +136,11 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 - `AgentEvent` (loop → front end): `("content",str) | ("reasoning",str) | ("tool_start",ToolCall) | ("tool_result",id,str) | ("done",str) | ("error",str)`
 - `StreamEvent` (gateway → loop): `("content",str) | ("reasoning",str) | ("tool_call",ToolCall) | ("done",finish_reason) | ("error",str)`
 
-**PATTERN — canonical example:** `tests/test_loop.py::test_two_turn_tool_call_flow` shows the whole loop contract: fake gateway streams DSML → loop heals → executes → replays reasoning verbatim on turn 2 → persists → answers. Read this one test to learn the loop.
+**PATTERN — the canonical example:** `tests/test_loop.py::test_two_turn_tool_call_flow` holds the whole loop contract in one place: a fake gateway streams DSML, the loop heals it, executes, replays reasoning verbatim on turn 2, persists, and answers. Read this one test and the loop is known.
 
 ## 3. QUICK START MAP
 
-*Purpose: file → purpose → when to open.*
+*Purpose: which file serves which end, and when to open it.*
 
 | File | Purpose | Open when… |
 |---|---|---|
@@ -155,7 +157,7 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 
 ## 4. IF YOU SEE X → IT MEANS Y
 
-*Purpose: decode confusing output instantly.*
+*Purpose: to read a strange output and know its meaning at once.*
 
 | You see… | It means… |
 |---|---|
@@ -176,7 +178,7 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 
 ## 5. PITFALLS
 
-*Purpose: mistakes that cost hours — read before editing.*
+*Purpose: the mistakes that have cost hours — read them before you edit.*
 
 - **PITFALL: core must stay stdlib-only.** `gateway/dialect/messages/context/loop` (plus `config/prompts/tools/memory/sessions`) map 1:1 to a Rust/Go port. No new deps in core. `textual` is legal ONLY in `harness/tui.py` (`cli.py` lazy-imports it).
 - **PITFALL: never send `tool_choice`, `temperature`, `stream_options`, or `store`.** This model rejects them (`gateway._build_body`); `test_build_body` asserts their absence.
@@ -190,23 +192,23 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 
 ## 6. Memory
 
-*Purpose: what to persist, where, and when.*
+*Purpose: what to write down, where, and when.*
 
 **Files** (committed, in `.agent-memory/`): `project-state.md` · `decisions.md` · `patterns.md` · `lessons-learned.md`.
 
-**Update triggers** — write after: milestone completion; architectural decisions; discovering non-obvious gotchas; fixing anything that consumed excessive time. Use the `memory_append` tool (sections: `project-state | decisions | patterns | lessons-learned`) or edit the files directly.
+**Update triggers** — write when: a milestone is complete; an architectural decision is made; a non-obvious gotcha is discovered; anything has consumed excessive time. Use the `memory_append` tool (sections: `project-state | decisions | patterns | lessons-learned`) or edit the files directly.
 
 **Rules** (`memory.py`): 200-line cap per file (oldest `##` section pruned); digest capped at 4000 est. tokens and 60 lines/section, head-biased — put critical notes early, keep entries self-contained; verbatim dedupe returns `already recorded`; each session outcome is auto-appended to `project-state.md` (`record_session_summary`).
 
-**AGENTS.md = durable anchor; `.agent-memory/` = dynamic state.** Edit AGENTS.md only for stable, load-bearing facts; use memory files for evolving state.
+**AGENTS.md is the durable anchor; `.agent-memory/` is the moving state.** Edit AGENTS.md only for stable, load-bearing facts; put evolving state in the memory files.
 
 ### `.kaal/` files — caches & config, NOT memory
 
-Memory lives only in `.agent-memory/`; everything under `.kaal/` is regenerable cache or explicit config: `STRUCTURE.md` (tree cache, below), `tool-cache.json` (read-only tool-result cache, §2), and `hooks.json` (verify-hook config, §2). `harness/structure.py` scans the project tree (noise dirs skipped: `.git` `.venv` `node_modules` `.kaal` `dist` `build` `.omp` `__pycache__` + caches; depth ≤ 6, ≤ 20k entries, ≤ 500 lines) and writes a markdown tree under `.kaal/` (git-ignored; atomic temp+replace write). A signature (`<!-- sig: … -->` comment at the end) hashes (relpath, size, mtime_ns); `refresh()` regenerates only when it changed, `ensure()` never rescans an existing cache. The first ~120 lines are injected into the system prompt (`prompts.build_project_context`) so reopen is instant. Refreshed after every tool batch (`loop._one_step`) and between TUI turns (`turn_finished`); TUI shows a one-line summary on mount and `/structure` dumps the doc.
+No memory dwells under `.kaal/`; everything there is regenerable cache or explicit config: `STRUCTURE.md` (tree cache, below), `tool-cache.json` (read-only tool-result cache, §2), and `hooks.json` (verify-hook config, §2). `harness/structure.py` scans the project tree (noise dirs skipped: `.git` `.venv` `node_modules` `.kaal` `dist` `build` `.omp` `__pycache__` + caches; depth ≤ 6, ≤ 20k entries, ≤ 500 lines) and writes a markdown tree under `.kaal/` (git-ignored; atomic temp+replace write). A signature (`<!-- sig: … -->` comment at the end) hashes (relpath, size, mtime_ns); `refresh()` regenerates only when it changed, `ensure()` never rescans an existing cache. The first ~120 lines are injected into the system prompt (`prompts.build_project_context`) so reopen is instant. Refreshed after every tool batch (`loop._one_step`) and between TUI turns (`turn_finished`); TUI shows a one-line summary on mount and `/structure` dumps the doc.
 
 ## 7. Tool preferences
 
-*Purpose: explore with the least context spend.*
+*Purpose: to explore with the least cost to the context.*
 
 1. **Directory listing** (`read` on a directory → ~2-level listing) to orient → **`grep`** to locate → **line-selected `read`** (`offset`/`limit` or `:N-M`) to read only what's needed.
 2. `grep` before whole-file reads, always. `glob` to map structure.
@@ -214,7 +216,7 @@ Memory lives only in `.agent-memory/`; everything under `.kaal/` is regenerable 
 
 ## 8. Navigation order
 
-*Purpose: fastest ramp for a new agent.*
+*Purpose: the fastest road for a new agent.*
 
 1. This file (you're here).
 2. `tests/test_loop.py::test_two_turn_tool_call_flow` — the whole loop contract in one test.
