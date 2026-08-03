@@ -319,9 +319,9 @@ class TestToolRegistry(unittest.TestCase):
         for inner_first, inner_second in zip(first, second):
             self.assertIs(inner_first, inner_second)  # memoized inner dicts
 
-    def test_grep_skips_kala_dir(self):
-        # The tool cache lives under .kala and must never be scanned by grep.
-        self.make(".kala/tool-cache.json", '{"needle": "cached secret"}')
+    def test_grep_skips_kaal_dir(self):
+        # The tool cache lives under .kaal and must never be scanned by grep.
+        self.make(".kaal/tool-cache.json", '{"needle": "cached secret"}')
         self.make("visible.txt", "needle visible\n")
         result = self.reg.execute("grep", {"pattern": "needle"})
         self.assertIn("visible.txt:1: needle visible", result)
@@ -397,7 +397,7 @@ class TestCacheCounters(unittest.TestCase):
     def _cached_registry(self) -> ToolRegistry:
         return ToolRegistry(
             project_dir=self.project,
-            cache=ToolCache(self.project / ".kala" / "tool-cache.json"),
+            cache=ToolCache(self.project / ".kaal" / "tool-cache.json"),
         )
 
     def test_first_read_misses_second_hits(self):

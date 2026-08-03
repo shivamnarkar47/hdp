@@ -110,7 +110,7 @@ class Memory:
         otherwise the absolute file path after enforcing the 200-line cap (the
         oldest `##` section is dropped until the file fits). The whole
         read → dedupe → append → prune sequence runs under an advisory flock
-        on the section file so concurrent kala runs cannot interleave and lose
+        on the section file so concurrent kaal runs cannot interleave and lose
         entries.
         """
         path = self.file_path(section)

@@ -44,7 +44,7 @@ DENY_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">\s*/dev/sd", re.IGNORECASE),
 ]
 
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".kala"}
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".kaal"}
 _MEMORY_SECTIONS = ("project-state", "decisions", "patterns", "lessons-learned")
 _DENY_MESSAGE = "blocked by harness policy (destructive command)"
 
@@ -377,7 +377,7 @@ class ToolRegistry:
                 "--glob",
                 "!__pycache__/**",
                 "--glob",
-                "!.kala/**",
+                "!.kaal/**",
                 "--",
                 pattern,
                 str(root.relative_to(self.project_dir)),
@@ -762,7 +762,7 @@ _TOOL_SPECS: list[tuple[str, str, dict[str, Any]]] = [
     ),
     (
         "spawn_agent",
-        "Run a nested kala agent on a sub-task and return its JSON summary "
+        "Run a nested kaal agent on a sub-task and return its JSON summary "
         "{answer, steps, usage, session_id}; answer capped at 50000 chars.",
         {
             "type": "object",

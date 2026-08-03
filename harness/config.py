@@ -63,16 +63,16 @@ def estimate_cost(
 
 
 def user_key_path() -> Path:
-    """Path of the user API-key store (`$XDG_CONFIG_HOME/kala/api_key`).
+    r"""Path of the user API-key store (`$XDG_CONFIG_HOME/kaal/api_key`).
 
-    Windows uses `%APPDATA%\kala\api_key`; POSIX falls back to
+    Windows uses `%APPDATA%\kaal\api_key`; POSIX falls back to
     `~/.config` when `XDG_CONFIG_HOME` is unset.
     """
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "kala" / "api_key"
+    return base / "kaal" / "api_key"
 
 
 def save_user_api_key(key: str) -> None:
@@ -126,7 +126,7 @@ def get_api_key() -> str:
         pass  # fall through to the hard error below
 
     print(
-        "kala: no API key found. Set OPENCODE_API_KEY, run `kala` and use "
+        "kaal: no API key found. Set OPENCODE_API_KEY, run `kaal` and use "
         "/connect, or re-add the opencode-go credential (`opencode` / "
         "`omp /connect`). Checked: env OPENCODE_API_KEY, "
         f"{user_key_path()}, and ~/.omp/agent/agent.db.",

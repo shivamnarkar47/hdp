@@ -49,7 +49,7 @@ def reference_truncate_history(messages, system_message, max_prompt_tokens):
 
 def sample_history() -> list:
     return [
-        SystemMessage("you are kala"),
+        SystemMessage("you are kaal"),
         UserMessage("old question"),
         AssistantMessage("old answer"),
         ToolResultMessage("call_1", "old result"),
@@ -71,8 +71,8 @@ class TestContext(unittest.TestCase):
 
     def test_truncate_keeps_system_and_last_user(self):
         history = sample_history()
-        truncated = truncate_history(history, SystemMessage("you are kala"), max_prompt_tokens=10)
-        self.assertEqual(truncated[0].text, "you are kala")
+        truncated = truncate_history(history, SystemMessage("you are kaal"), max_prompt_tokens=10)
+        self.assertEqual(truncated[0].text, "you are kaal")
         self.assertNotIn(history[1], truncated)  # oldest user dropped
         self.assertNotIn(history[2], truncated)  # its assistant dropped
         self.assertNotIn(history[3], truncated)  # its tool result dropped
@@ -81,7 +81,7 @@ class TestContext(unittest.TestCase):
 
     def test_truncate_noop_when_fits(self):
         history = sample_history()
-        truncated = truncate_history(history, SystemMessage("you are kala"), max_prompt_tokens=10**9)
+        truncated = truncate_history(history, SystemMessage("you are kaal"), max_prompt_tokens=10**9)
         self.assertEqual(len(truncated), len(history))
         self.assertIsInstance(truncated[0], SystemMessage)
 
@@ -99,7 +99,7 @@ class TestTruncationLedger(unittest.TestCase):
         re-serializing implementation, across varied random histories."""
         rng = random.Random(42)
         for _ in range(80):
-            messages = [SystemMessage("you are kala")]
+            messages = [SystemMessage("you are kaal")]
             for _t in range(rng.randint(3, 12)):
                 messages.append(UserMessage("u" * rng.randint(1, 4000)))
                 if rng.random() < 0.8:

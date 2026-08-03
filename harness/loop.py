@@ -128,7 +128,7 @@ class AgentLoop:
         # loop is depth 2, and spawning is disabled at depth >= 2 (recursion
         # capped at two nested loops). See _spawn.
         self._spawn_depth = spawn_depth
-        # Verify hook command from .kala/hooks.json, read ONCE at run() start
+        # Verify hook command from .kaal/hooks.json, read ONCE at run() start
         # (None = feature off: missing file, invalid JSON, empty array, or
         # enable_verify=False). Runs after any mutating batch; its output is
         # CONTENT for the model, never a loop abort.
@@ -489,7 +489,7 @@ class AgentLoop:
     # -- verify hooks -------------------------------------------------------
 
     def _load_verify_cmd(self) -> None:
-        """Read .kala/hooks.json once into self._verify_cmd (None = off).
+        """Read .kaal/hooks.json once into self._verify_cmd (None = off).
 
         Explicit config only — no auto-derivation. Missing file, invalid
         JSON, a non-list or empty ``verify`` value, or enable_verify=False
@@ -498,7 +498,7 @@ class AgentLoop:
         self._verify_cmd = None
         if not self.enable_verify:
             return
-        hooks_path = self.tools.project_dir / ".kala" / "hooks.json"
+        hooks_path = self.tools.project_dir / ".kaal" / "hooks.json"
         try:
             raw = json.loads(hooks_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -560,7 +560,7 @@ class AgentLoop:
         returns the limit string without creating anything. Otherwise the
         nested run gets a FRESH ToolRegistry (no tool cache — Finding 6),
         fresh Memory under the resolved dir, its own session id (visible in
-        ``kala sessions list``), allow_dangerous=False, enable_verify=False,
+        ``kaal sessions list``), allow_dangerous=False, enable_verify=False,
         max_steps <= 5, and a wall-clock timeout.
 
         The nested loop ALWAYS runs on its own worker thread (a fresh

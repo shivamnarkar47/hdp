@@ -1,7 +1,7 @@
 """Read-only tool-result cache: a small JSON file keyed by (tool, args, sig).
 
 Iterative loops re-run the same greps/reads on unchanged trees. This cache
-stores read/grep/glob results in ``.kala/tool-cache.json`` (git-ignored)
+stores read/grep/glob results in ``.kaal/tool-cache.json`` (git-ignored)
 keyed by ``tool|sha256(args_json)|structure_signature`` — the sha256 keeps
 the file small and the structure signature in the key means a changed tree
 auto-misses. Storage is stdlib-only: lazy JSON load on first access, atomic
@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 class ToolCache:
-    """Persistent tool-result cache under ``.kala/tool-cache.json``."""
+    """Persistent tool-result cache under ``.kaal/tool-cache.json``."""
 
     def __init__(self, path: Path, max_bytes: int = 4_000_000) -> None:
         self._path = Path(path)
