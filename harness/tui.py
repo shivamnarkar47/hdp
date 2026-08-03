@@ -923,7 +923,9 @@ class HarnessTui(App):
     }
 
     #prompt {
-        height: 3;
+        height: 1;
+        min-height: 1;
+        max-height: 3;
         padding: 0 1;
         background: $panel;
         border: none;

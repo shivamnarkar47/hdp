@@ -143,6 +143,25 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_prompt_input_renders_single_line(self):
+        """The prompt is a compact one-line input: resolved height is 1 cell,
+        and Shift+Enter newlines stay in the document (internal scroll) instead
+        of clipping the typed text."""
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                self.assertEqual(prompt.outer_size.height, 1)
+                self.assertEqual(prompt.styles.height.value, 1)
+                prompt.focus()
+                await pilot.press("a", "shift+enter", "b")
+                await pilot.pause()
+                # Still one cell tall, but the full multi-line text is intact.
+                self.assertEqual(prompt.outer_size.height, 1)
+                self.assertEqual(prompt.text, "a\nb")
+
+        asyncio.run(flow())
+
     def test_verify_hook_renders_dim_line(self):
         """A hooks file + a mutating turn renders the dim `🧪 verify` pane line
         (fast hook: python -c print)."""
