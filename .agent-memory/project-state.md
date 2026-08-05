@@ -116,6 +116,9 @@ Termaid diagrams now mount INLINE at their fence positions: turn end splits the 
 ## 2026-08-06 — max-steps compaction
 When a turn burns its step budget (steps >= max_steps-1; the final answer generation does not emit a step), the TUI folds all but the newest 10 conversation widgets into one dim line (`.compacted-notice`); the transcript mirror is untouched. Suite: 298 green.
 
+## 2026-08-06 — epic voice is the defining character
+AGENTS.md §0 strengthened: the Mahabharata voice now defines the agent's character, not a veneer — Mahabharata references (characters/places/situations as metaphors) are to be used mostly and naturally, with exact facts woven in between; precision still outranks flourish when clarity is at stake.
+
 ## 2026-08-06 — catalog refresh + /models UX
 MODELS refreshed from ~/.cache/opencode/models.json: 48 entries (24 free zen/v1 + 24 paid opencode-go; new: mimo-v2.5-pro, trinity-large-preview-free, ling/laguna/ring/nemotron-ultra free, grok-code, big-pickle, …). /models modal upgraded: filter input (name/id substring), non-selectable Free/Paid section headers, active model ✓ + scrolled into view on open, ↑/↓ skip headers, Enter from filter activates.
 ## 2026-08-04 00:58
