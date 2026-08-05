@@ -1374,6 +1374,10 @@ class TestTui(unittest.TestCase):
                 # The worker is mid-reasoning (sleeping); the spinner must be up.
                 await pilot.pause(0.15)
                 self.assertTrue(app._thinking_visible)
+                # Live elapsed seconds: the wait is measured, not silent.
+                self.assertRegex(
+                    str(app._thinking.render()), r"💭 thinking \d+\.\ds"
+                )
                 for _ in range(200):  # up to ~10s
                     if not app.turn_active:
                         break

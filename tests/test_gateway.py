@@ -414,6 +414,27 @@ class TestKeepAliveTransport(unittest.TestCase):
         for _ in range(2):
             self.assertEqual(list(gateway.stream(msgs)), [("content", "hi"), ("done", None)])
 
+    def test_warm_opens_connection_ahead_of_request(self):
+        """warm() does the TCP connect immediately; the first stream then
+        rides that connection — one handshake total, zero request latency
+        for the connect RTT."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            gateway_mod._set_transport()
+            try:
+                with _serve() as server:
+                    gateway = Gateway(server.base_url, "sk-test", "deepseek-v4-flash")
+                    gateway.warm()
+                    self.assertEqual(server.connections, 1)
+                    self.assertEqual(server.requests, 0)  # no request yet
+                    msgs = [{"role": "user", "content": "hi"}]
+                    self.assertEqual(
+                        list(gateway.stream(msgs)), [("content", "hi"), ("done", None)]
+                    )
+                    self.assertEqual(server.connections, 1)  # reused, not re-opened
+                    self.assertEqual(server.requests, 1)
+            finally:
+                gateway_mod._set_transport()
+
     def test_keepalive_opener_raises_http_error_on_non2xx(self):
         _TestHandler.status = 429
         _TestHandler.body = b"rate limited"

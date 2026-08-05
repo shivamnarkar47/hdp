@@ -16,6 +16,8 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -144,6 +146,27 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+def _start_progress(args: argparse.Namespace) -> threading.Event | None:
+    """Live elapsed-time progress on stderr (perceived responsiveness: a
+    measured wait, never silent dead air). Off for --verbose (reasoning
+    already streams live), --batch (workers would interleave), and non-TTY
+    stderr (pipes stay clean). The returned event stops the ticker; the
+    caller must set it when the run finishes."""
+    if args.verbose or args.batch is not None or not sys.stderr.isatty():
+        return None
+    stop = threading.Event()
+
+    def tick() -> None:
+        start = time.monotonic()
+        while not stop.is_set():
+            sys.stderr.write(f"\r💭 working {time.monotonic() - start:4.1f}s")
+            sys.stderr.flush()
+            time.sleep(0.2)
+
+    threading.Thread(target=tick, daemon=True).start()
+    return stop
+
+
 def _run_one(
     prompt: str, args: argparse.Namespace, session_id: str, ask_handler=None
 ) -> dict:
@@ -220,21 +243,33 @@ def _run_one(
         elif kind == "tool_start":
             tool_calls += 1
 
+    progress_stop = _start_progress(args)
     try:
         answer = loop.run(prompt, emit=emit_cb)
     except LoopError as exc:
-        return {"session_id": session_id, "error": str(exc), "error_kind": "loop"}
+        record: dict = {
+            "session_id": session_id, "error": str(exc), "error_kind": "loop"
+        }
     except GatewayError as exc:
-        return {"session_id": session_id, "error": str(exc), "error_kind": "gateway"}
-    return {
-        "session_id": session_id,
-        "answer": answer,
-        # getattr defaults keep minimal loop stubs (flag-plumbing tests)
-        # working; a real AgentLoop always exposes these.
-        "steps": getattr(loop, "steps", 0),
-        "tool_calls": tool_calls,
-        "usage": getattr(loop, "usage", {}),
-    }
+        record = {
+            "session_id": session_id, "error": str(exc), "error_kind": "gateway"
+        }
+    else:
+        record = {
+            "session_id": session_id,
+            "answer": answer,
+            # getattr defaults keep minimal loop stubs (flag-plumbing tests)
+            # working; a real AgentLoop always exposes these.
+            "steps": getattr(loop, "steps", 0),
+            "tool_calls": tool_calls,
+            "usage": getattr(loop, "usage", {}),
+        }
+    finally:
+        if progress_stop is not None:
+            progress_stop.set()
+            sys.stderr.write("\r" + " " * 32 + "\r")
+            sys.stderr.flush()
+    return record
 
 
 def _public_record(record: dict) -> dict:

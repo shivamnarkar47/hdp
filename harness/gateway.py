@@ -122,6 +122,22 @@ class KeepAliveOpener:
             )
         raise urllib.error.URLError("keep-alive transport exhausted")  # unreachable
 
+    def warm(self, scheme: str, host: str, port: int, timeout: float | None = None) -> None:
+        """Pre-open the per-thread connection: TCP + TLS handshake happen
+        now, so the first real request skips the connect RTT. Best-effort —
+        a failure here just means the first request opens the connection as
+        usual (the open() retry path already handles stale sockets)."""
+        if timeout is None:
+            timeout = self._timeout
+        try:
+            conn = self._connect(scheme, host, port, timeout)
+            # HTTPConnection only opens the socket on request(); warm must
+            # do the TCP + TLS handshake itself.
+            conn.connect()
+            self._local.cached = ((scheme, host, port), conn)
+        except OSError:
+            pass
+
     def _drop(self) -> None:
         cached = getattr(self._local, "cached", None)
         self._local.cached = None
@@ -165,6 +181,19 @@ _KEEPALIVE_OPENER = KeepAliveOpener()
 def _keepalive_urlopen(request, timeout=None):
     """Module opener: perform the request on the per-thread keep-alive connection."""
     return _KEEPALIVE_OPENER.open(request, timeout=timeout)
+
+
+def warm_transport(base_url: str, timeout: float | None = None) -> None:
+    """Pre-open the keep-alive connection to the gateway host.
+
+    No-op when keep-alive is disabled (KAAL_NO_KEEPALIVE or proxies) or the
+    connection cannot be opened. Saves the connect + TLS RTT from the first
+    request's latency; call it at startup, before the user submits.
+    """
+    if not _keepalive_enabled():
+        return
+    scheme, host, port, _ = _split_request_url(base_url.rstrip("/") + "/")
+    _KEEPALIVE_OPENER.warm(scheme, host, port, timeout)
 
 
 def _keepalive_enabled() -> bool:
@@ -295,6 +324,12 @@ class Gateway:
         self.base_url = base_url
         self.api_key = api_key
         self.model_id = model_id
+
+    def warm(self) -> None:
+        """Pre-open the transport connection so the first stream() skips the
+        connect + TLS handshake. Best-effort and thread-safe to call early:
+        a TUI can warm on mount, before the user submits anything."""
+        warm_transport(self.base_url, REQUEST_TIMEOUT)
 
     def stream(
         self,

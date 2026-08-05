@@ -1352,6 +1352,14 @@ class HarnessTui(App):
         self._render_context()
         self._render_composer_state()
         self._render_status()
+        # Pre-open the gateway connection (connect + TLS) in the background so
+        # the first turn skips that RTT; the socket may still be idle-closed
+        # by the server, and open() reconnects as usual if so.
+        import threading as _threading
+
+        warm = getattr(self.gateway, "warm", None)
+        if warm is not None:
+            _threading.Thread(target=warm, daemon=True).start()
         # 30s clock ticker keeps the status-bar date fresh; lives for the app
         # lifetime (cheap single-widget update).
         self._clock_timer = self.set_interval(30.0, self._render_status)
@@ -1812,7 +1820,11 @@ class HarnessTui(App):
             return
         frame = THINK_FRAMES[self._thinking_frame % len(THINK_FRAMES)]
         self._thinking_frame += 1
-        self._thinking.update(f"💭 thinking {frame}")
+        # Live elapsed seconds: a measured wait reads as progress, not dead air.
+        elapsed = ""
+        if self._turn_start is not None:
+            elapsed = f" {time.monotonic() - self._turn_start:.1f}s"
+        self._thinking.update(f"💭 thinking{elapsed} {frame}")
 
     def _hide_thinking(self) -> None:
         if not self._thinking_visible:

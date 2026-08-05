@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -274,6 +275,38 @@ class TestCli(unittest.TestCase):
         self.assertFalse(captured["enable_verify"])
 
     # -- run --agent ---------------------------------------------------------
+
+    def test_start_progress_tty_writes_and_stops(self):
+        """TTY stderr gets a live elapsed progress line; non-TTY gets none
+        (pipes stay clean)."""
+        from harness import cli
+
+        class FakeStderr:
+            def __init__(self) -> None:
+                self.buf = ""
+                self.tty = True
+
+            def isatty(self) -> bool:
+                return self.tty
+
+            def write(self, text: str) -> None:
+                self.buf += text
+
+            def flush(self) -> None:
+                pass
+
+        fake = FakeStderr()
+        args = mock.Mock(verbose=False, batch=None)
+        with mock.patch.object(cli.sys, "stderr", fake):
+            stop = cli._start_progress(args)
+            self.assertIsNotNone(stop)
+            time.sleep(0.45)
+            stop.set()
+            time.sleep(0.1)  # let the ticker thread exit
+        self.assertIn("working", fake.buf)
+        fake.tty = False
+        with mock.patch.object(cli.sys, "stderr", fake):
+            self.assertIsNone(cli._start_progress(args))
 
     def test_run_agent_flag_reaches_loop(self):
         """--agent Arjuna resolves from the seeded defaults and reaches the
