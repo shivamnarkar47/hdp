@@ -53,6 +53,8 @@
 
 When the epic voice and the skill's brevity rules conflict, the skill's shape wins — the voice colors the words, the skill shapes the structure. These rules outrank personal style and persist for the whole session.
 
+**Mermaid plans — STRICT, every plan.** Every plan — a one-paragraph task plan, a feature proposal, a refactor, an RFC, anything called a plan — MUST ship with at least one accurate ` ```mermaid ` diagram (flowchart, sequence, or state diagram, whichever fits). Diagrams are load-bearing, never decorative: every node and edge must match the written plan exactly; a drifting or wrong diagram is a defect to fix, not a flourish to keep. Preview every diagram with **termaid** before delivering — `kaal diagrams <file.mmd>` in the CLI, `/diagram <path>` in the TUI — and a diagram that does not render cleanly must be repaired, never shipped. When the work is too small for a diagram, say so in one line and still draw the smallest true picture of it.
+
 ## 1. Commands
 
 *Purpose: every real command, verified against the installed CLI — copy, paste, and it runs.*
@@ -69,6 +71,7 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 | `kaal doctor` | Self-check: python, textual, api key, gateway, structure cache, sessions dir |
 | `kaal --version` | Print `kaal 0.1.0` and exit |
 | `kaal update` | Self-update: git pull + reinstall from the installer checkout (or `KAAL_INSTALL_DIR`) |
+| `kaal diagrams <file.mmd>` | Render a mermaid diagram as terminal Unicode art via termaid (optional: `pip install kaal[diagrams]`) |
 | `.venv/bin/python -m unittest discover -s tests -v` | All unit tests |
 | `git config core.hooksPath .githooks` | Enable build-check hooks: pre-commit & pre-push run compileall + unittest + `kaal --version`; skip with `KAAL_SKIP_HOOKS=1` |
 

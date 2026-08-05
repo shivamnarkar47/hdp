@@ -24,6 +24,8 @@ mirror preserves the model's verbatim content.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -181,6 +183,7 @@ COMMANDS = [
     "/model",
     "/verbose",
     "/sidebar",
+    "/diagram",
     "/connect",
     "/quit",
     "/structure",
@@ -1931,6 +1934,32 @@ class HarnessTui(App):
         self._conversation.mount(Static(text, classes=classes, markup=False))
         self._scroll_follow()
 
+    def _render_diagram(self, path: str) -> None:
+        """Render a mermaid .mmd file as Unicode art via termaid (optional
+        dependency), printed into the conversation so a plan's diagram is
+        visible without leaving the TUI."""
+        termaid = shutil.which("termaid")
+        if termaid is None:
+            self._write_line(
+                "diagram: termaid not installed (uv tool install termaid)",
+                classes="notice",
+            )
+            return
+        try:
+            proc = subprocess.run(
+                [termaid, path], capture_output=True, text=True, timeout=60
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self._write_line(f"diagram: {exc}", classes="error-box")
+            return
+        if proc.returncode != 0:
+            self._write_line(
+                f"diagram: {(proc.stderr or proc.stdout).strip()}", classes="error-box"
+            )
+            return
+        for line in proc.stdout.splitlines()[:200]:
+            self._write_line(line)
+
     def set_follow_scroll(self, follow: bool) -> None:
         self._follow = follow
 
@@ -2453,6 +2482,11 @@ class HarnessTui(App):
             self.verbose = not self.verbose
             self._write_line(f"verbose {'on' if self.verbose else 'off'}")
             self._render_status()
+        elif cmd == "/diagram":
+            if not arg:
+                self._write_line("usage: /diagram <file.mmd>", classes="notice")
+            else:
+                self._render_diagram(arg)
         elif cmd == "/sidebar":
             self.action_toggle_sidebar()
         elif cmd == "/quit":

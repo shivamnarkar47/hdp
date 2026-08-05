@@ -91,5 +91,8 @@ Gateway.warm() pre-opens the keep-alive connection (TCP+TLS handshake at TUI mou
 
 ## 2026-08-04 — kaal update
 New `kaal update` subcommand: resolves the checkout (KAAL_INSTALL_DIR → ~/.local/share/kaal → running package's .git), git pull --ff-only, then reinstalls into the checkout's .venv (uv or pip, mirroring install.sh). Reports `updated: sha -> sha (subject)` or `up to date`. No checkout → clear error, exit 1. Tested against a real local git origin. Suite: 279 green.
+
+## 2026-08-04 — termaid diagram support
+`kaal diagrams <file.mmd>` renders mermaid via termaid (optional dep: pip install kaal[diagrams]); TUI gains `/diagram <path>` printing the Unicode-art render into the conversation. AGENTS.md §0 adds the STRICT mermaid rule: every plan must ship with an accurate ```mermaid diagram, previewed via termaid before delivery. Suite: 282 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

@@ -1018,6 +1018,29 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_diagram_command_renders_via_termaid(self):
+        """/diagram <file> renders the mermaid file through termaid and
+        prints its Unicode art into the conversation."""
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                fake = mock.Mock(returncode=0, stdout="A --> B\n", stderr="")
+                with mock.patch(
+                    "harness.tui.shutil.which", return_value="/usr/bin/termaid"
+                ), mock.patch(
+                    "harness.tui.subprocess.run", return_value=fake
+                ) as run:
+                    prompt = app.query_one("#prompt", TextArea)
+                    prompt.text = "/diagram plan.mmd"
+                    prompt.focus()
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                run.assert_called_once()
+                self.assertIn("A --> B", "\n".join(app.transcript))
+
+        asyncio.run(flow())
+
     def test_send_button_submits_composer_text(self):
         """The visible Send button follows the same path as Enter."""
         async def flow() -> None:

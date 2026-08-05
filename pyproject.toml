@@ -9,6 +9,9 @@ description = "kaal — a DeepSeek V4 Flash agent harness with a Textual TUI"
 requires-python = ">=3.12"
 dependencies = ["textual"]
 
+[project.optional-dependencies]
+diagrams = ["termaid"]  # render mermaid .mmd files as terminal Unicode art
+
 [project.scripts]
 kaal = "harness.cli:main"
 

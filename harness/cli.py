@@ -103,6 +103,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="self-check the environment")
     sub.add_parser("update", help="pull and reinstall the latest kaal")
+    diagrams_p = sub.add_parser("diagrams", help="render a mermaid .mmd file via termaid")
+    diagrams_p.add_argument("file", help="mermaid diagram file (.mmd)")
 
     return parser
 
@@ -124,6 +126,8 @@ def main(argv: list[str] | None = None) -> None:
         code = _doctor(args)
     elif args.subcommand == "update":
         code = _update(args)
+    elif args.subcommand == "diagrams":
+        code = _diagrams(args)
     else:
         code = 2  # unreachable: argparse rejects unknown subcommands
     sys.exit(code)
@@ -219,6 +223,37 @@ def _update(args: argparse.Namespace) -> int:
         print(f"kaal is up to date ({after}).")
     else:
         print(f"kaal updated: {before} -> {after} ({subject})")
+    return 0
+
+
+def _diagrams(args: argparse.Namespace) -> int:
+    """Render a mermaid .mmd file as terminal Unicode art via termaid.
+
+    termaid is an optional dependency (pip install kaal[diagrams]); when it
+    is missing the command fails with an install hint instead of guessing.
+    """
+    termaid = shutil.which("termaid")
+    if termaid is None:
+        print(
+            "kaal: termaid not found — install it with: uv tool install termaid "
+            "(or pip install kaal[diagrams])",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        proc = subprocess.run(
+            [termaid, args.file], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"kaal: termaid failed: {exc}", file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        print(
+            f"kaal: termaid failed: {(proc.stderr or proc.stdout).strip()}",
+            file=sys.stderr,
+        )
+        return 1
+    print(proc.stdout, end="")
     return 0
 
 

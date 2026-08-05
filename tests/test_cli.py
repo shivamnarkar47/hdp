@@ -350,6 +350,28 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("kaal is up to date", out.getvalue())
 
+    def test_diagrams_renders_via_termaid(self):
+        """`kaal diagrams` pipes the .mmd through a termaid on PATH."""
+        bin_dir = self.tempdir / "bin"
+        bin_dir.mkdir()
+        termaid = bin_dir / "termaid"
+        termaid.write_text("#!/bin/sh\ncat \"$1\"\n")
+        termaid.chmod(0o755)
+        mmd = self.tempdir / "plan.mmd"
+        mmd.write_text("A --> B\n")
+        path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            code, out, _ = self._run_cli(["diagrams", str(mmd)])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "A --> B\n")
+
+    def test_diagrams_missing_termaid_hints(self):
+        """No termaid on PATH: install hint on stderr, exit 1."""
+        with mock.patch.dict(os.environ, {"PATH": str(self.tempdir)}):
+            code, _, err = self._run_cli(["diagrams", "x.mmd"])
+        self.assertEqual(code, 1)
+        self.assertIn("termaid not found", err)
+
     def test_update_no_checkout_reports_error(self):
         """No checkout found: clear stderr message, exit 1."""
         from harness import cli
