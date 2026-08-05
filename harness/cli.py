@@ -135,9 +135,14 @@ def main(argv: list[str] | None = None) -> None:
 
 def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.prompt is None:
-        if args.batch is None:
+        if args.batch is not None:
+            return _run_batch(args, parser)
+        if args.resume:
+            # `kaal run --resume <id>` alone is a valid continuation: the
+            # hint printed after a TUI session ends uses exactly this form.
+            args.prompt = "continue"
+        else:
             parser.error("the following arguments are required: prompt")
-        return _run_batch(args, parser)
     prompt = args.prompt
     if prompt == "-":
         # Reading from a TTY blocks; that is the user's explicit choice.

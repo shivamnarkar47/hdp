@@ -106,5 +106,8 @@ Termaid diagrams now mount INLINE at their fence positions: turn end splits the 
 
 ## 2026-08-04 — /models switcher + free tier
 `/models` opens a catalog modal (35 models, sorted free-first then ascending price; each row shows id + `$in · $out per 1M` or `free`); Enter switches, persists as default (`~/.config/kaal/model`), rebuilds the gateway — free-tier models route to the zen/v1 endpoint (FREE_BASE_URL), paid to zen/go/v1. `kaal run` honors the saved default; `--model` flag still wins. Cost estimation uses the active model's rates (free → $0). Catalog verified against ~/.cache/opencode/models.json. Suite: 294 green.
+
+## 2026-08-06 — resume hint actually works
+`kaal run --resume <id>` without a prompt used to argparse-error ("prompt required") — the exact form the TUI's end-of-session hint prints. Now the missing prompt defaults to `continue`, so the hint works verbatim. Test added; verified against a real resumed session. Suite: 295 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

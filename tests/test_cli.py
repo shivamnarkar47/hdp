@@ -473,6 +473,37 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(gw2.call_args.args[2], "kimi-k2.5")
 
+    def test_run_resume_without_prompt_defaults_continue(self):
+        """`kaal run --resume <id>` with no prompt continues with 'continue'
+        instead of demanding a prompt (the TUI's end-of-session hint uses
+        exactly this form)."""
+        captured = {}
+
+        class FakeAgentLoop:
+            def __init__(self, *args, **kwargs):
+                captured["resume"] = kwargs.get("resume")
+                captured["session_id"] = args[3]
+
+            def run(self, prompt, emit=None):
+                captured["prompt"] = prompt
+                if emit:
+                    emit(("content", "resumed ok"))
+                    emit(("done", "stop"))
+                return "resumed ok"
+
+        gateway = FakeGateway([("content", "resumed ok"), ("done", "stop")])
+        with mock.patch("harness.cli.Gateway", return_value=gateway), mock.patch(
+            "harness.cli.AgentLoop", FakeAgentLoop
+        ):
+            code, out, _ = self._run_cli(
+                ["run", "--resume", "20260806-000603", "--dir", str(self.tempdir)]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(captured["prompt"], "continue")
+        self.assertIs(captured["resume"], True)
+        self.assertEqual(captured["session_id"], "20260806-000603")
+        self.assertIn("resumed ok", out)
+
     def test_run_agent_flag_reaches_loop(self):
         """--agent Arjuna resolves from the seeded defaults and reaches the
         constructed AgentLoop as the persona dict."""
