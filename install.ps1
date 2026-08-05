@@ -32,6 +32,21 @@ function Assert-KaalNative {
     }
 }
 
+# --- Install uv first -------------------------------------------------------
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Host "uv not found; installing it (https://astral.sh/uv)"
+    try {
+        Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+    } catch {
+        Write-Host "Error: the uv installer failed. Install uv manually:" -ForegroundColor Red
+        Write-Host "  https://docs.astral.sh/uv/" -ForegroundColor Red
+        exit 1
+    }
+    # The official installer drops `uv` into $HOME\.local\bin (also BIN_DIR).
+    $env:PATH = "$HOME\.local\bin;$env:PATH"
+}
+Write-Host "Found uv $(& uv --version 2>$null)"
+
 # --- Python check (>= 3.12) -------------------------------------------------
 $PythonCmd = $null
 $PythonArg = $null
@@ -116,6 +131,7 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
         Pop-Location
     }
 } else {
+    Write-Host "uv unavailable; falling back to python -m venv + pip"
     Write-Host "Creating virtual environment with python -m venv"
     if ($PythonArg) {
         & $PythonCmd $PythonArg -m venv (Join-Path $InstallDir '.venv')

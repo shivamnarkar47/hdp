@@ -23,6 +23,19 @@ version_ge() {
   (( ${#a[@]} >= ${#b[@]} ))
 }
 
+# --- Install uv first -------------------------------------------------------
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv not found; installing it (https://astral.sh/uv)"
+  curl -LsSf https://astral.sh/uv/install.sh | sh || {
+    echo "Error: the uv installer failed. Install uv manually:" >&2
+    echo "  https://docs.astral.sh/uv/" >&2
+    exit 1
+  }
+  # The official installer drops `uv` into ~/.local/bin (also our BIN_DIR).
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+echo "Found uv $(uv --version 2>/dev/null || true)"
+
 # --- Python check (>= 3.12) -------------------------------------------------
 if ! command -v python3 >/dev/null 2>&1; then
   echo "Error: python3 was not found on PATH." >&2
@@ -53,13 +66,14 @@ fi
 
 # --- Virtual environment -----------------------------------------------------
 cd "$INSTALL_DIR"
-if command -v uv >/dev/null 2>&1; then
+    if command -v uv >/dev/null 2>&1; then
   if [[ ! -x "$INSTALL_DIR/.venv/bin/python" ]]; then
     echo "Creating virtual environment with uv"
     uv venv "$INSTALL_DIR/.venv"
   fi
   uv pip install --python "$INSTALL_DIR/.venv/bin/python" .
 else
+  echo "uv unavailable; falling back to python -m venv + pip"
   echo "Creating virtual environment with python3 -m venv"
   python3 -m venv "$INSTALL_DIR/.venv"
   "$INSTALL_DIR/.venv/bin/pip" install .
