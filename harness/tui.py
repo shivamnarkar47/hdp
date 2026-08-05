@@ -782,9 +782,12 @@ class ModelsScreen(ModalScreen[str | None]):
                 classes="connect-hint",
             )
 
+
+
     def _rebuild_rows(self) -> None:
-        """Recompute the visible rows from the filter query (sections only
-        when the list is unfiltered) and redraw the ListView."""
+        """Recompute the visible rows from the filter query (a table header
+        row, then Free/Paid sections only when unfiltered) and redraw the
+        ListView."""
         query = self._query.strip().lower()
         shown = [
             m
@@ -793,7 +796,7 @@ class ModelsScreen(ModalScreen[str | None]):
             or query in m.get("id", "").lower()
             or query in m.get("name", "").lower()
         ]
-        self._rows = []
+        self._rows = [("head", None)]
         if not query:
             free = [m for m in shown if m.get("base_url")]
             paid = [m for m in shown if not m.get("base_url")]
@@ -808,11 +811,21 @@ class ModelsScreen(ModalScreen[str | None]):
         list_view = self.query_one("#model-list", ListView)
         list_view.remove_children()
         for kind, payload in self._rows:
-            if kind == "section":
+            if kind == "head":
+                list_view.mount(ListItem(Label(self._head_line(), classes="model-section model-head")))
+            elif kind == "section":
                 list_view.mount(ListItem(Label(str(payload), classes="model-section")))
             else:
                 list_view.mount(self._model_item(payload))  # type: ignore[arg-type]
         self._jump_to_active()
+
+    @staticmethod
+    def _head_line() -> str:
+        return (
+            "MODEL".ljust(ModelsScreen._NAME_W)
+            + "ID".ljust(ModelsScreen._ID_W)
+            + "$ IN · $ OUT per 1M"
+        )
 
     @on(Input.Changed)
     def _on_filter_changed(self, event: Input.Changed) -> None:
@@ -868,27 +881,37 @@ class ModelsScreen(ModalScreen[str | None]):
         self._rebuild_rows()
         self.query_one("#model-filter", Input).focus()
 
+    # Column widths for the compact table rows (monospace alignment).
+    _NAME_W = 30
+    _ID_W = 26
+
     @staticmethod
     def _price_line(model: dict) -> str:
         input_per_m = model.get("input_per_m", 0)
         output_per_m = model.get("output_per_m", 0)
         if input_per_m == 0 and output_per_m == 0:
             return "free"
-        return f"${input_per_m:.3g} in · ${output_per_m:.3g} out per 1M"
+        return f"${input_per_m:.3g} · ${output_per_m:.3g}"
+
+    @staticmethod
+    def _cell(text: str, width: int) -> str:
+        if len(text) > width:
+            return text[: width - 1] + "…"
+        return text.ljust(width)
 
     def _model_item(self, model: dict) -> ListItem:
         mid = model.get("id", "")
         is_active = mid == self._active_id
-        name_label = Label(
-            (f"✓ {model.get('name', mid)}" if is_active else model.get("name", mid)),
-            classes="model-name active" if is_active else "model-name",
+        name = model.get("name", mid)
+        mark = "✓ " if is_active else "  "
+        line = (
+            mark
+            + self._cell(name, self._NAME_W)
+            + self._cell(mid, self._ID_W)
+            + self._price_line(model)
         )
-        price = self._price_line(model)
         return ListItem(
-            Vertical(
-                name_label,
-                Label(f"{mid}  ·  {price}", classes="model-desc"),
-            )
+            Label(line, classes="model-row active" if is_active else "model-row")
         )
 
     def action_cancel(self) -> None:
@@ -1202,10 +1225,16 @@ class HarnessTui(App):
         margin: 0 0 1 0;
     }
 
-    .thinking {
+.thinking {
         color: $accent;
         text-style: dim;
         margin: 0 0 1 0;
+    }
+
+    .compacted-notice {
+        color: $text-muted;
+        text-style: dim;
+        margin: 1 0 1 0;
     }
 
     .trace-line {
@@ -1343,22 +1372,22 @@ class HarnessTui(App):
         margin-bottom: 1;
     }
 
-    #model-list .model-name {
+    #model-list .model-row {
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    #model-list .model-row.active {
+        color: $accent;
         text-style: bold;
     }
 
-    #model-list .model-name.active {
-        color: $accent;
-        text-style: bold underline;
+    #model-list .model-head {
+        color: $text;
+        text-style: bold;
     }
 
-    #model-list .model-desc {
-        color: $text-muted;
-        text-style: dim;
-    }
-
-    #model-list:focus > .list-item.-highlight .model-name,
-    #model-list:focus > .list-item.-highlight .model-desc {
+    #model-list:focus > .list-item.-highlight .model-row {
         color: $text;
     }
 
@@ -2757,6 +2786,34 @@ class HarnessTui(App):
         self._refresh_memory()
         self._refresh_sessions()
         self._render_status()
+        # A turn that burned its full step budget leaves a long trace behind;
+        # fold the older conversation widgets into one dim line so the pane
+        # stays usable. The transcript mirror is untouched — nothing is lost,
+        # only folded on screen. `_steps` counts tool steps and the final
+        # answer generation does not emit one, so the cap is reached one step
+        # earlier: the last generation either answered or the loop aborted.
+        if self._steps >= self.max_steps - 1:
+            self._compact_conversation()
+
+    def _compact_conversation(self) -> None:
+        """Collapse all but the newest conversation widgets into a dim line."""
+        children = list(self._conversation.children)
+        keep = 10
+        if len(children) <= keep + 1:
+            return
+        removed = len(children) - keep
+        first_kept = children[-keep]
+        for child in children[:-keep]:
+            child.remove()
+        self._conversation.mount(
+            Static(
+                f"… {removed} earlier messages compacted — transcript keeps everything …",
+                classes="compacted-notice",
+                markup=False,
+            ),
+            before=first_kept,
+        )
+        self._scroll_follow()
 
     # -- actions ------------------------------------------------------------
 

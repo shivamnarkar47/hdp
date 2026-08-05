@@ -1176,11 +1176,14 @@ class TestTui(unittest.TestCase):
                 self.assertIsInstance(app.screen, ModelsScreen)
                 screen = app.screen
                 list_view = screen.query_one("#model-list", ListView)
-                # 48 models + 2 section headers, free section first.
-                self.assertEqual(len(list_view.children), len(config.MODELS) + 2)
-                self.assertEqual(screen._rows[0], ("section", "— Free —"))
-                first = str(list_view.children[1].query_one(Label).render())
+                # 48 models + table header + 2 section headers; the first
+                # model row is the free flash (header row is non-selectable).
+                self.assertEqual(len(list_view.children), len(config.MODELS) + 3)
+                self.assertEqual(screen._rows[0][0], "head")
+                self.assertEqual(screen._rows[1], ("section", "— Free —"))
+                first = str(list_view.children[2].query_one(Label).render())
                 self.assertIn("DeepSeek V4 Flash (Free)", first)
+                self.assertIn("$ IN", str(list_view.children[0].query_one(Label).render()))
                 rows = " ".join(
                     str(item.query_one(Label).render()) for item in list_view.children
                 )
@@ -1594,6 +1597,51 @@ class TestTui(unittest.TestCase):
                 self.assertRegex(status, r"\d{2}:\d{2}")  # HH:MM clock
                 self.assertNotRegex(status, r"\d{8}-")  # raw session id stays out
                 self.assertGreater(app._total_cost, 0.0)
+
+        asyncio.run(flow())
+
+    def test_max_steps_compacts_conversation(self):
+        """A turn that burns its full step budget folds the older widgets
+        into one dim line; the transcript keeps everything."""
+        def tool_turn(path: str) -> list:
+            envelope = (
+                f"<{FW}DSML{FW}tool_calls>"
+                f"<{FW}DSML{FW}invoke name=\"write\">"
+                f"<{FW}DSML{FW}parameter name=\"path\" string=\"true\">{path}</{FW}DSML{FW}parameter>"
+                f"<{FW}DSML{FW}parameter name=\"content\" string=\"true\">hi</{FW}DSML{FW}parameter>"
+                f"</{FW}DSML{FW}invoke></{FW}DSML{FW}tool_calls>"
+            )
+            return [
+                ("reasoning", f"check {path}"),
+                ("content", envelope),
+                ("content", f"writing {path} "),
+                ("done", "tool_calls"),
+            ]
+
+        async def flow() -> None:
+            # Three distinct tool turns + the final answer = 4 generations,
+            # exactly the budget — the turn completes AND hits the cap.
+            app = HarnessTui(
+                gateway=FakeGateway(
+                    tool_turn("hello1.txt"),
+                    tool_turn("hello2.txt"),
+                    tool_turn("hello3.txt"),
+                    list(TURN_STOP),
+                ),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+                max_steps=4,
+            )
+            async with app.run_test() as pilot:
+                await self._submit_and_wait(app, "multi-step task", pilot)
+                await pilot.pause()
+                # Three tool steps; the final answer generation does not count.
+                self.assertGreaterEqual(app._steps, 3)
+                notice = app.query_one(".compacted-notice", Static)
+                self.assertIn("compacted", str(notice.render()))
+                # The transcript mirror is untouched: every chunk is still there.
+                transcript = "".join(app.transcript)
+                self.assertIn("Wrote hello.txt.", transcript)
 
         asyncio.run(flow())
 
