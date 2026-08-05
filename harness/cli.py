@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import io
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
@@ -162,17 +165,22 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     return 0
 
 
+# The upstream repository (mirrors install.sh's KAAL_REPO_URL default).
+_KAAL_REPO_URL = "https://github.com/shivamnarkar47/kaal"
+
 # Where the installer keeps the checkout (install.sh): override with
 # KAAL_INSTALL_DIR, else $HOME/.local/share/kaal. The dev fallback walks up
 # from the running harness package to its own .git.
 def _resolve_checkout() -> Path | None:
     """The kaal source checkout to update: the installer dir first, then the
     repo the running code was launched from (dev checkouts / editable
-    installs). Returns None when neither exists."""
+    installs). A checkout counts with a .git dir OR a pyproject.toml — the
+    tarball install path (install.sh's curl fallback) has no git history.
+    Returns None when neither exists."""
     env_dir = os.environ.get("KAAL_INSTALL_DIR")
     candidates = [Path(env_dir)] if env_dir else [Path.home() / ".local" / "share" / "kaal"]
     for cand in candidates:
-        if (cand / ".git").is_dir():
+        if (cand / ".git").is_dir() or (cand / "pyproject.toml").is_file():
             return cand
     here = Path(harness.__file__).resolve().parent
     for parent in (here, *here.parents):
@@ -202,8 +210,9 @@ def _update(args: argparse.Namespace) -> int:
         )
         return 1
     if shutil.which("git") is None:
-        print("kaal: update needs git on PATH", file=sys.stderr)
-        return 1
+        # No git: do what install.sh's curl fallback does — fetch the
+        # main-branch tarball and overlay it on the checkout.
+        return _update_tarball(checkout)
     try:
         before = _run_cmd(["git", "rev-parse", "--short", "HEAD"], checkout)
         _run_cmd(["git", "pull", "--ff-only"], checkout)
@@ -218,13 +227,23 @@ def _update(args: argparse.Namespace) -> int:
     # New commit pulled: rebuild the program into the checkout's venv — the
     # same install step install.sh performs, so the running installation and
     # the checkout can never drift.
+    if not _rebuild_checkout(checkout):
+        return 1
+    print(f"kaal updated: {before} -> {after} ({subject})")
+    print("kaal rebuilt into .venv — restart kaal to use the new build.")
+    return 0
+
+
+def _rebuild_checkout(checkout: Path) -> bool:
+    """Reinstall the checkout into its .venv (uv or pip), mirroring
+    install.sh. Returns True on success; prints the failure reason."""
     venv_python = checkout / ".venv" / "bin" / "python"
     if not venv_python.is_file():
         print(
             "kaal: pulled, but no .venv in the checkout — re-run install.sh",
             file=sys.stderr,
         )
-        return 1
+        return False
     try:
         if shutil.which("uv"):
             _run_cmd(
@@ -234,8 +253,58 @@ def _update(args: argparse.Namespace) -> int:
             _run_cmd([str(venv_python), "-m", "pip", "install", "."], checkout)
     except (OSError, RuntimeError) as exc:
         print(f"kaal: pulled, but rebuild failed: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
+def _update_tarball(checkout: Path) -> int:
+    """Git-less update — the same thing install.sh's curl fallback does:
+    fetch the main-branch tarball and overlay it on the checkout. The .venv
+    survives; stale code files are cleared first so upstream deletions do not
+    linger."""
+    url = f"{_KAAL_REPO_URL}/archive/refs/heads/main.tar.gz"
+    print(f"kaal: fetching {url}")
+    tmp: Path | None = None
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            payload = resp.read()
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+            top = tar.getnames()[0].split("/", 1)[0]
+            tmp = Path(tempfile.mkdtemp(prefix="kaal-update-"))
+            tar.extractall(tmp, filter="data")  # no absolute/.. paths
+        src = tmp / top
+        for stale in (
+            "harness",
+            "tests",
+            "docs",
+            "pyproject.toml",
+            "README.md",
+            "AGENTS.md",
+            "install.sh",
+            "install.ps1",
+            ".gitignore",
+            ".githooks",
+        ):
+            path = checkout / stale
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+        for child in src.iterdir():
+            dest = checkout / child.name
+            if child.is_dir():
+                shutil.copytree(child, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(child, dest)
+    except (OSError, tarfile.TarError) as exc:
+        print(f"kaal: update failed: {exc}", file=sys.stderr)
         return 1
-    print(f"kaal updated: {before} -> {after} ({subject})")
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+    if not _rebuild_checkout(checkout):
+        return 1
+    print("kaal updated from the main tarball.")
     print("kaal rebuilt into .venv — restart kaal to use the new build.")
     return 0
 

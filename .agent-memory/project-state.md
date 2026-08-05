@@ -109,5 +109,8 @@ Termaid diagrams now mount INLINE at their fence positions: turn end splits the 
 
 ## 2026-08-06 — resume hint actually works
 `kaal run --resume <id>` without a prompt used to argparse-error ("prompt required") — the exact form the TUI's end-of-session hint prints. Now the missing prompt defaults to `continue`, so the hint works verbatim. Test added; verified against a real resumed session. Suite: 295 green.
+
+## 2026-08-06 — kaal update tarball fallback
+`kaal update` without git now does what install.sh's curl fallback does: fetch the main-branch tarball (urllib, filter="data" extraction), clear known code locations, overlay, keep .venv/unknown files, rebuild. `_resolve_checkout` accepts git-less checkouts (pyproject.toml marker) so tarball-installed dirs update. Suite: 297 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

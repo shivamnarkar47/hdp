@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -432,6 +433,88 @@ class TestCli(unittest.TestCase):
             code, _, err = self._run_cli(["diagrams", "x.mmd"])
         self.assertEqual(code, 1)
         self.assertIn("termaid not found", err)
+
+    def test_update_tarball_fallback_overlays_and_rebuilds(self):
+        """No git: the tarball path (install.sh's curl fallback) overlays the
+        main branch, clears stale files, keeps the .venv, and rebuilds once.
+        The function is exercised directly — never through checkout
+        resolution — so a temp dir can never alias the real repo."""
+        from harness import cli
+
+        checkout = self.tempdir / "checkout"
+        checkout.mkdir()
+        (checkout / "harness").mkdir()
+        (checkout / "harness" / "__init__.py").write_text("# old\n")
+        (checkout / "harness" / "old_module.py").write_text("stale code\n")
+        (checkout / "notes.txt").write_text("keep me\n")
+        venv_python = checkout / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n")
+        venv_python.chmod(0o755)
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name, content in (
+                ("kaal-main/harness/__init__.py", "# v2\n"),
+                ("kaal-main/newfile.txt", "new\n"),
+            ):
+                data = content.encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        payload = buf.getvalue()
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return payload
+
+        real_which = cli.shutil.which
+        rebuild_calls: list[list[str]] = []
+        real_run = cli._run_cmd
+
+        def fake_which(name):
+            if name == "uv":
+                return None
+            return real_which(name)
+
+        def fake_run(cmd, cwd):
+            if cmd[-2:] == ["install", "."]:
+                rebuild_calls.append(cmd)
+                return ""
+            return real_run(cmd, cwd)
+
+        out = io.StringIO()
+        with mock.patch.object(cli.shutil, "which", side_effect=fake_which), mock.patch(
+            "harness.cli.urllib.request.urlopen", return_value=FakeResp()
+        ), mock.patch.object(cli, "_run_cmd", side_effect=fake_run):
+            with contextlib.redirect_stdout(out):
+                code = cli._update_tarball(checkout)
+        self.assertEqual(code, 0)
+        self.assertEqual((checkout / "harness" / "__init__.py").read_text(), "# v2\n")
+        self.assertEqual((checkout / "newfile.txt").read_text(), "new\n")
+        # Known code locations are cleared wholesale (upstream deletions do
+        # not linger); unknown local files survive the overlay.
+        self.assertFalse((checkout / "harness" / "old_module.py").exists())
+        self.assertEqual((checkout / "notes.txt").read_text(), "keep me\n")
+        self.assertTrue((checkout / ".venv" / "bin" / "python").is_file())
+        self.assertIn("updated from the main tarball", out.getvalue())
+        self.assertEqual(len(rebuild_calls), 1)
+
+    def test_resolve_checkout_accepts_gitless_tarball_dir(self):
+        """A tarball-installed checkout (pyproject.toml, no .git) resolves."""
+        from harness import cli
+
+        checkout = self.tempdir / "tarball-install"
+        checkout.mkdir()
+        (checkout / "pyproject.toml").write_text("[project]\n")
+        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}):
+            self.assertEqual(cli._resolve_checkout(), checkout)
 
     def test_update_no_checkout_reports_error(self):
         """No checkout found: clear stderr message, exit 1."""
