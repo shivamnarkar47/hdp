@@ -1018,6 +1018,79 @@ class TestTui(unittest.TestCase):
 
         asyncio.run(flow())
 
+    def test_mermaid_auto_renders_at_turn_end(self):
+        """A ```mermaid fence in the answer is auto-converted: termaid runs
+        on a worker and the Unicode art mounts below the assistant block."""
+        async def flow() -> None:
+            answer = (
+                "Here is the flow.\n\n"
+                "```mermaid\n"
+                "flowchart LR\n  A --> B\n"
+                "```\n"
+            )
+            app = HarnessTui(
+                gateway=FakeGateway([("content", answer), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                fake = mock.Mock(returncode=0, stdout="A --> B\n", stderr="")
+                with mock.patch(
+                    "harness.tui.shutil.which", return_value="/usr/bin/termaid"
+                ), mock.patch(
+                    "harness.tui.subprocess.run", return_value=fake
+                ) as run:
+                    prompt = app.query_one("#prompt", TextArea)
+                    prompt.text = "draw the flow"
+                    prompt.focus()
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    for _ in range(200):
+                        if not app.turn_active:
+                            break
+                        await pilot.pause(0.05)
+                    # The worker thread marshals the art back; wait for mount.
+                    for _ in range(100):
+                        if app.query(".diagram-box"):
+                            break
+                        await pilot.pause(0.05)
+                    await pilot.pause()
+                run.assert_called_once()
+                box = app.query_one(".diagram-box", Static)
+                self.assertIn("A --> B", str(box.render()))
+                # Transcript keeps the verbatim mermaid source, not the art.
+                self.assertIn("```mermaid", "".join(app.transcript))
+
+        asyncio.run(flow())
+
+    def test_mermaid_missing_termaid_notice(self):
+        """Fence detected but no termaid: one dim notice, no crash."""
+        async def flow() -> None:
+            answer = "```mermaid\nflowchart LR\n  A --> B\n```\n"
+            app = HarnessTui(
+                gateway=FakeGateway([("content", answer), ("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                with mock.patch("harness.tui.shutil.which", return_value=None):
+                    prompt = app.query_one("#prompt", TextArea)
+                    prompt.text = "draw"
+                    prompt.focus()
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    for _ in range(200):
+                        if not app.turn_active:
+                            break
+                        await pilot.pause(0.05)
+                    await pilot.pause()
+                self.assertIn(
+                    "termaid not installed", "\n".join(app.transcript)
+                )
+                self.assertEqual(len(app.query(".diagram-box")), 0)
+
+        asyncio.run(flow())
+
     def test_diagram_command_renders_via_termaid(self):
         """/diagram <file> renders the mermaid file through termaid and
         prints its Unicode art into the conversation."""

@@ -24,6 +24,7 @@ mirror preserves the model's verbatim content.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -159,6 +160,12 @@ def _close_md_window(text: str, cut: int) -> tuple[str, str]:
 # (PREVIEW_CHARS); the compact conversation tool line shows ~120 chars.
 PREVIEW_CHARS = 200
 TOOL_PREVIEW_CHARS = 120
+
+# Auto-render: at turn end every ```mermaid fence in the turn's markdown is
+# piped to termaid (stdin) and the Unicode art is mounted below the answer.
+# Capped so a pathological turn can't spawn a render storm.
+_MERMAID_FENCE_RE = re.compile(r"```mermaid[^\n]*\n(.*?)```", re.DOTALL)
+MAX_DIAGRAMS_PER_TURN = 3
 
 # Content starting with any of these counts as a failed tool result.
 _ERROR_STARTS = (
@@ -1009,6 +1016,14 @@ class HarnessTui(App):
 
     .assistant-md {
         margin: 0 0 1 0;
+    }
+
+    .diagram-box {
+        margin: 0 0 1 0;
+        padding: 1 2;
+        color: $text-muted;
+        background: $surface;
+        border: round $accent;
     }
 
     .reasoning {
@@ -1934,6 +1949,54 @@ class HarnessTui(App):
         self._conversation.mount(Static(text, classes=classes, markup=False))
         self._scroll_follow()
 
+    def _render_mermaid_diagrams(self) -> None:
+        """Auto-convert every mermaid fence in the finished turn's markdown:
+        each fence is piped to termaid on a worker thread and the Unicode art
+        is mounted below the assistant block. The transcript keeps the
+        verbatim source; only the widget gains the art."""
+        if not self._md_windows:
+            return
+        fences = _MERMAID_FENCE_RE.findall(self._turn_md_text)
+        if not fences:
+            return
+        if shutil.which("termaid") is None:
+            self._write_line(
+                "diagram: termaid not installed — install with: uv tool install termaid",
+                classes="notice",
+            )
+            return
+        for i, source in enumerate(fences[:MAX_DIAGRAMS_PER_TURN]):
+            threading.Thread(
+                target=self._diagram_worker, args=(i, source), daemon=True
+            ).start()
+
+    def _diagram_worker(self, index: int, source: str) -> None:
+        """Worker thread: render one fence via termaid (stdin). Never touches
+        widgets — the art is marshaled back through call_from_thread."""
+        try:
+            proc = subprocess.run(
+                ["termaid"], input=source, capture_output=True, text=True, timeout=60
+            )
+            art = proc.stdout if proc.returncode == 0 else ""
+            err = (proc.stderr or proc.stdout).strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            art, err = "", str(exc)
+        self.call_from_thread(self._on_diagram_done, index, art, err)
+
+    def _on_diagram_done(self, index: int, art: str, err: str) -> None:
+        """Main thread: mount the rendered diagram below the assistant block."""
+        if self._cancel_turn or self._conversation is None:
+            return
+        if not art:
+            self._write_line(f"diagram: render failed: {err}", classes="notice")
+            return
+        box = Static(art, classes="diagram-box", markup=False)
+        if self._md_windows:
+            self._conversation.mount(box, after=self._md_windows[-1])
+        else:
+            self._conversation.mount(box)
+        self._scroll_follow()
+
     def _render_diagram(self, path: str) -> None:
         """Render a mermaid .mmd file as Unicode art via termaid (optional
         dependency), printed into the conversation so a plan's diagram is
@@ -2362,6 +2425,11 @@ class HarnessTui(App):
         self._hide_thinking()
         self._flush_md()
         self._close_unclosed_fence()
+        # Auto-convert any mermaid the model drew: termaid renders each fence
+        # on a worker thread and the art lands below the answer. Skipped on
+        # cancel (the partial text is not worth drawing).
+        if not self._cancel_turn:
+            self._render_mermaid_diagrams()
         self.turn_active = False
         self.resume_next = True
         # Freeze the turn's average throughput on the bar until the next turn.

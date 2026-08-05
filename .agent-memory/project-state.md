@@ -94,5 +94,8 @@ New `kaal update` subcommand: resolves the checkout (KAAL_INSTALL_DIR → ~/.loc
 
 ## 2026-08-04 — termaid diagram support
 `kaal diagrams <file.mmd>` renders mermaid via termaid (optional dep: pip install kaal[diagrams]); TUI gains `/diagram <path>` printing the Unicode-art render into the conversation. AGENTS.md §0 adds the STRICT mermaid rule: every plan must ship with an accurate ```mermaid diagram, previewed via termaid before delivery. Suite: 282 green.
+
+## 2026-08-04 — mermaid auto-render
+TUI turn end scans the finished markdown for ```mermaid fences and pipes each to termaid (stdin, worker thread, ≤3/turn); the Unicode art mounts below the answer in an accent diagram-box; transcript keeps verbatim source. Missing termaid → one dim notice. Cancelled turns skip rendering. Suite: 284 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok
