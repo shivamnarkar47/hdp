@@ -1,21 +1,35 @@
-# install.ps1 - kaal installer for Windows (PowerShell 5.1+)
+# install.ps1 - kaal installer for Windows (PowerShell 5.1+ / 7+)
 # NOTE: written and reviewed on Linux; not executed here. The logic mirrors
 # install.sh. Test on a real Windows machine before relying on it.
 #
 # Overrides (env): KAAL_REPO_URL, KAAL_INSTALL_DIR, KAAL_BIN_DIR
-$ErrorActionPreference = 'Stop'
+#Requires -Version 5.1
 
-$RepoUrl   = if ($env:KAAL_REPO_URL)   { $env:KAAL_REPO_URL }   else { 'https://github.com/shivamnarkar47/kaal.git' }
+$ErrorActionPreference = 'Stop'
+# PowerShell 7.3+: make native nonzero exits throw like cmdlet errors.
+# Harmless no-op on Windows PowerShell 5.1.
+$PSNativeCommandUseErrorActionPreference = $true
+
+$RepoUrl    = if ($env:KAAL_REPO_URL)    { $env:KAAL_REPO_URL }    else { 'https://github.com/shivamnarkar47/kaal.git' }
 $InstallDir = if ($env:KAAL_INSTALL_DIR) { $env:KAAL_INSTALL_DIR } else { Join-Path $HOME '.local\share\kaal' }
-$BinDir    = if ($env:KAAL_BIN_DIR)    { $env:KAAL_BIN_DIR }    else { Join-Path $HOME '.local\bin' }
+$BinDir     = if ($env:KAAL_BIN_DIR)     { $env:KAAL_BIN_DIR }     else { Join-Path $HOME '.local\bin' }
 
 function Test-KaalPythonVersion {
     param([string]$VersionText)
-    $m = [regex]::Match($VersionText, 'Python\s+(\d+)\.(\d+)')
-    if (-not $m.Success) { return $false }
-    $major = [int]$m.Groups[1].Value
-    $minor = [int]$m.Groups[2].Value
-    return ($major -gt 3) -or ($major -eq 3 -and $minor -ge 12)
+    if ($VersionText -match 'Python\s+(\d+)\.(\d+)') {
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        return ($major -gt 3) -or ($major -eq 3 -and $minor -ge 12)
+    }
+    return $false
+}
+
+function Assert-KaalNative {
+    # Throw when the last native command failed. PS 5.1 does not raise on
+    # nonzero exits, so every git/uv/pip/tar call must pass through here.
+    if ($LASTEXITCODE -ne 0) {
+        throw "command failed with exit code $LASTEXITCODE"
+    }
 }
 
 # --- Python check (>= 3.12) -------------------------------------------------
@@ -47,10 +61,12 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 if (Test-Path (Join-Path $InstallDir '.git')) {
     Write-Host "Updating existing installation at $InstallDir"
     git -C $InstallDir pull --ff-only
+    Assert-KaalNative
 }
 elseif (Get-Command git -ErrorAction SilentlyContinue) {
     Write-Host "Cloning $RepoUrl into $InstallDir"
     git clone $RepoUrl $InstallDir
+    Assert-KaalNative
 }
 else {
     Write-Host "git not found; downloading a tarball of the main branch"
@@ -59,17 +75,22 @@ else {
     # bsdtar ships with Windows 10 1803+ and reads .tar.gz directly.
     if (Get-Command tar -ErrorAction SilentlyContinue) {
         tar -xf $Tarball -C $InstallDir --strip-components=1
+        Assert-KaalNative
     } else {
-        # Rare: neither git nor tar. Expand-Archive only reads ZIP archives,
-        # so decompress the .tar.gz to a plain .tar first. If the system's
-        # Expand-Archive still cannot read that .tar (Windows PowerShell 5.1),
+        # Rare: neither git nor tar. Decompress to a plain .tar with the
+        # .NET GZipStream, then let Expand-Archive (ZIP-only) try it. If the
+        # system still cannot read that .tar (Windows PowerShell 5.1),
         # installing Git for Windows is the fix.
         $PlainTar = Join-Path $env:TEMP 'kaal.tar'
         $src = [System.IO.File]::OpenRead($Tarball)
-        $gz = New-Object System.IO.Compression.GZipStream($src, [System.IO.Compression.CompressionMode]::Decompress)
+        $gz = [System.IO.Compression.GZipStream]::new(
+            $src, [System.IO.Compression.CompressionMode]::Decompress)
         $dst = [System.IO.File]::Create($PlainTar)
-        $gz.CopyTo($dst)
-        $dst.Dispose(); $gz.Dispose(); $src.Dispose()
+        try {
+            $gz.CopyTo($dst)
+        } finally {
+            $dst.Dispose(); $gz.Dispose(); $src.Dispose()
+        }
         try {
             Expand-Archive -Path $PlainTar -DestinationPath $InstallDir -Force
         } catch {
@@ -80,17 +101,30 @@ else {
 }
 
 # --- Virtual environment ----------------------------------------------------
-Write-Host "Creating virtual environment at $InstallDir\.venv"
-if ($PythonArg) {
-    & $PythonCmd $PythonArg -m venv "$InstallDir\.venv"
+$VenvPython = Join-Path $InstallDir '.venv\Scripts\python.exe'
+if (Get-Command uv -ErrorAction SilentlyContinue) {
+    Write-Host "Creating virtual environment with uv"
+    if (-not (Test-Path $VenvPython)) {
+        uv venv (Join-Path $InstallDir '.venv')
+        Assert-KaalNative
+    }
+    Push-Location $InstallDir
+    try {
+        uv pip install --python $VenvPython .
+        Assert-KaalNative
+    } finally {
+        Pop-Location
+    }
 } else {
-    & $PythonCmd -m venv "$InstallDir\.venv"
-}
-Push-Location $InstallDir
-try {
-    & "$InstallDir\.venv\Scripts\python.exe" -m pip install .
-} finally {
-    Pop-Location
+    Write-Host "Creating virtual environment with python -m venv"
+    if ($PythonArg) {
+        & $PythonCmd $PythonArg -m venv (Join-Path $InstallDir '.venv')
+    } else {
+        & $PythonCmd -m venv (Join-Path $InstallDir '.venv')
+    }
+    Assert-KaalNative
+    & $VenvPython -m pip install .
+    Assert-KaalNative
 }
 
 # --- Launcher ----------------------------------------------------------------
@@ -98,11 +132,12 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 $Launcher = Join-Path $BinDir 'kaal.cmd'
 @"
 @echo off
-"$InstallDir\.venv\Scripts\python.exe" -m harness %*
+"$VenvPython" -m harness %*
 "@ | Set-Content -Path $Launcher -Encoding ASCII
 
 # --- PATH hint ---------------------------------------------------------------
-if ($env:PATH -notlike "*$BinDir*") {
+$PathEntries = @($env:PATH -split ';' | Where-Object { $_ })
+if ($PathEntries -notcontains $BinDir) {
     Write-Host "NOTE: $BinDir is not on your PATH. Add it with:"
     Write-Host "  setx PATH `"$env:PATH;$BinDir`""
     Write-Host "(or via System Properties > Environment Variables)"
