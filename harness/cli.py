@@ -14,13 +14,17 @@ import argparse
 import concurrent.futures
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import harness
 
 from harness import __version__, config, sessions
 from harness.gateway import Gateway, GatewayError
@@ -98,6 +102,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("doctor", help="self-check the environment")
+    sub.add_parser("update", help="pull and reinstall the latest kaal")
 
     return parser
 
@@ -117,6 +122,8 @@ def main(argv: list[str] | None = None) -> None:
         code = _sessions(args)
     elif args.subcommand == "doctor":
         code = _doctor(args)
+    elif args.subcommand == "update":
+        code = _update(args)
     else:
         code = 2  # unreachable: argparse rejects unknown subcommands
     sys.exit(code)
@@ -143,6 +150,75 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         return 2 if record.get("error_kind") == "loop" else 1
     if args.json:
         print(json.dumps(_public_record(record)))
+    return 0
+
+
+# Where the installer keeps the checkout (install.sh): override with
+# KAAL_INSTALL_DIR, else $HOME/.local/share/kaal. The dev fallback walks up
+# from the running harness package to its own .git.
+def _resolve_checkout() -> Path | None:
+    """The kaal source checkout to update: the installer dir first, then the
+    repo the running code was launched from (dev checkouts / editable
+    installs). Returns None when neither exists."""
+    env_dir = os.environ.get("KAAL_INSTALL_DIR")
+    candidates = [Path(env_dir)] if env_dir else [Path.home() / ".local" / "share" / "kaal"]
+    for cand in candidates:
+        if (cand / ".git").is_dir():
+            return cand
+    here = Path(harness.__file__).resolve().parent
+    for parent in (here, *here.parents):
+        if (parent / ".git").is_dir():
+            return parent
+    return None
+
+
+def _run_cmd(cmd: list[str], cwd: Path) -> str:
+    """Run a command in cwd; return stdout, or raise with stderr on failure."""
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}")
+    return proc.stdout.strip()
+
+
+def _update(args: argparse.Namespace) -> int:
+    """Self-update: git pull the checkout, then reinstall into its venv —
+    the same two steps install.sh performs, so `kaal update` keeps the
+    running installation in sync with main."""
+    checkout = _resolve_checkout()
+    if checkout is None:
+        print(
+            "kaal: no kaal checkout found — re-run install.sh, or set "
+            "KAAL_INSTALL_DIR to the checkout",
+            file=sys.stderr,
+        )
+        return 1
+    if shutil.which("git") is None:
+        print("kaal: update needs git on PATH", file=sys.stderr)
+        return 1
+    try:
+        before = _run_cmd(["git", "rev-parse", "--short", "HEAD"], checkout)
+        _run_cmd(["git", "pull", "--ff-only"], checkout)
+        after = _run_cmd(["git", "rev-parse", "--short", "HEAD"], checkout)
+        subject = _run_cmd(["git", "log", "-1", "--format=%s"], checkout)
+    except (OSError, RuntimeError) as exc:
+        print(f"kaal: update failed: {exc}", file=sys.stderr)
+        return 1
+    venv_python = checkout / ".venv" / "bin" / "python"
+    if venv_python.is_file():
+        try:
+            if shutil.which("uv"):
+                _run_cmd(
+                    ["uv", "pip", "install", "--python", str(venv_python), "."], checkout
+                )
+            else:
+                _run_cmd([str(venv_python), "-m", "pip", "install", "."], checkout)
+        except (OSError, RuntimeError) as exc:
+            print(f"kaal: pulled, but reinstall failed: {exc}", file=sys.stderr)
+            return 1
+    if before == after:
+        print(f"kaal is up to date ({after}).")
+    else:
+        print(f"kaal updated: {before} -> {after} ({subject})")
     return 0
 
 

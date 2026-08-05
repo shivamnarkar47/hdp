@@ -42,7 +42,7 @@ Both installers honor the `KAAL_REPO_URL`, `KAAL_INSTALL_DIR`, and `KAAL_BIN_DIR
 - `kaal` — launch the Textual TUI
 - `kaal run "PROMPT"` — one-shot session from the CLI (`--dir`, `--model`, `--max-steps`, `--resume SESSION_ID`, `--json`, …); `--batch FILE --workers N` runs many prompts (one per line or a JSON array) as parallel sessions; `--no-tool-cache` and `--no-verify` disable the read-result cache and post-mutation verify hooks
 - `kaal sessions list` — list past sessions
-- `kaal sessions show|delete|prune` — inspect/delete/prune sessions; `kaal doctor` — self-check; `kaal run -` — read the prompt from stdin; `kaal --version`
+- `kaal sessions show|delete|prune` — inspect/delete/prune sessions; `kaal doctor` — self-check; `kaal run -` — read the prompt from stdin; `kaal update` — self-update (pull + reinstall); `kaal --version`
 - TUI slash commands: `/help`, `/new`, `/resume <id>`, `/sessions`, `/connect`, `/structure`, `/memory`, `/model`, `/verbose`, `/quit`
 - terminal font: Fira Sans Condensed — see `docs/terminal-setup.md`
 

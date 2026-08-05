@@ -88,5 +88,8 @@ MAX_OUTPUT_TOKENS 384k → 32k (bounds runaway reasoning, the dominant slow-resp
 
 ## 2026-08-04 — perceived-latency package
 Gateway.warm() pre-opens the keep-alive connection (TCP+TLS handshake at TUI mount, background thread; first turn skips connect RTT; no-op on plain-urllib path). TUI thinking indicator shows live elapsed seconds. `kaal run` shows a live `💭 working Ns` ticker on TTY stderr (off for --verbose/--batch/pipes). Suite: 277 green.
+
+## 2026-08-04 — kaal update
+New `kaal update` subcommand: resolves the checkout (KAAL_INSTALL_DIR → ~/.local/share/kaal → running package's .git), git pull --ff-only, then reinstalls into the checkout's .venv (uv or pip, mirroring install.sh). Reports `updated: sha -> sha (subject)` or `up to date`. No checkout → clear error, exit 1. Tested against a real local git origin. Suite: 279 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

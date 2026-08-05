@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -307,6 +308,58 @@ class TestCli(unittest.TestCase):
         fake.tty = False
         with mock.patch.object(cli.sys, "stderr", fake):
             self.assertIsNone(cli._start_progress(args))
+
+    def _git(self, cwd: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    def test_update_pulls_newer_commit(self):
+        """`kaal update` pulls origin into the checkout and reports the new
+        commit; a second run is up to date."""
+        from harness import cli
+
+        origin = self.tempdir / "origin"
+        origin.mkdir()
+        self._git(origin, "init", "-q")
+        self._git(origin, "config", "user.email", "t@example.com")
+        self._git(origin, "config", "user.name", "t")
+        (origin / "v.txt").write_text("one")
+        self._git(origin, "add", ".")
+        self._git(origin, "commit", "-qm", "v1")
+        checkout = self.tempdir / "checkout"
+        self._git(self.tempdir, "clone", "-q", str(origin), str(checkout))
+        # A newer commit lands upstream.
+        (origin / "v.txt").write_text("two")
+        self._git(origin, "add", ".")
+        self._git(origin, "commit", "-qm", "v2")
+
+        args = mock.Mock()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}):
+            with contextlib.redirect_stdout(out):
+                code = cli._update(args)
+        self.assertEqual(code, 0)
+        self.assertEqual((checkout / "v.txt").read_text(), "two")
+        self.assertIn("kaal updated:", out.getvalue())
+        self.assertIn("v2", out.getvalue())
+
+        # Second run: nothing new upstream.
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}):
+            with contextlib.redirect_stdout(out):
+                code = cli._update(args)
+        self.assertEqual(code, 0)
+        self.assertIn("kaal is up to date", out.getvalue())
+
+    def test_update_no_checkout_reports_error(self):
+        """No checkout found: clear stderr message, exit 1."""
+        from harness import cli
+
+        err = io.StringIO()
+        with mock.patch.object(cli, "_resolve_checkout", return_value=None):
+            with mock.patch("sys.stderr", new=err):
+                code = cli._update(mock.Mock())
+        self.assertEqual(code, 1)
+        self.assertIn("no kaal checkout", err.getvalue())
 
     def test_run_agent_flag_reaches_loop(self):
         """--agent Arjuna resolves from the seeded defaults and reaches the

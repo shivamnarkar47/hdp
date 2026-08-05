@@ -68,6 +68,7 @@ When the epic voice and the skill's brevity rules conflict, the skill's shape wi
 | `kaal sessions prune [--keep N]` | Delete all but the newest N sessions |
 | `kaal doctor` | Self-check: python, textual, api key, gateway, structure cache, sessions dir |
 | `kaal --version` | Print `kaal 0.1.0` and exit |
+| `kaal update` | Self-update: git pull + reinstall from the installer checkout (or `KAAL_INSTALL_DIR`) |
 | `.venv/bin/python -m unittest discover -s tests -v` | All unit tests |
 | `git config core.hooksPath .githooks` | Enable build-check hooks: pre-commit & pre-push run compileall + unittest + `kaal --version`; skip with `KAAL_SKIP_HOOKS=1` |
 
