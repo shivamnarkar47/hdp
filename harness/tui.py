@@ -747,30 +747,126 @@ class AskScreen(ModalScreen[str | None]):
 
 
 class ModelsScreen(ModalScreen[str | None]):
-    """Modal model switcher: Enter activates the highlighted model.
+    """Modal model switcher: type to filter, ↑/↓ to move, Enter to activate.
 
-    Each row shows the model name (the active one marked ✓), its id, and the
-    catalog price — "free" for the $0 tier, otherwise `$in in · $out out` per
-    1M tokens. Dismisses with the chosen id, or None on Esc.
+    Free and paid sections are separated by non-selectable headers; the
+    active model is marked ✓ and scrolled into view on open. The filter box
+    narrows the list by name or id (case-insensitive); the choice persists
+    as the default until changed. Dismisses with the chosen id, or None.
     """
 
     BINDINGS = [
         Binding("escape", "cancel", "Close"),
+        Binding("up", "list_up", show=False),
+        Binding("down", "list_down", show=False),
     ]
 
     def __init__(self, model_list: list[dict], active_id: str | None = None) -> None:
         super().__init__()
         self._models = model_list
         self._active_id = active_id
+        # Rows as (kind, payload): ("section", label) | ("model", dict).
+        self._rows: list[tuple[str, object]] = []
+        self._query = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="models-box"):
             yield Static(f"Models ({len(self._models)})", classes="connect-title")
-            yield ListView(*[self._row(m) for m in self._models], id="model-list")
+            yield Input(
+                placeholder="filter models…  (name or id)",
+                id="model-filter",
+            )
+            yield ListView(id="model-list")
             yield Static(
-                "↑/↓ select · Enter activate · Esc close — the choice stays the default",
+                "type to filter · ↑/↓ · Enter activate · Esc close — default until changed",
                 classes="connect-hint",
             )
+
+    def _rebuild_rows(self) -> None:
+        """Recompute the visible rows from the filter query (sections only
+        when the list is unfiltered) and redraw the ListView."""
+        query = self._query.strip().lower()
+        shown = [
+            m
+            for m in self._models
+            if not query
+            or query in m.get("id", "").lower()
+            or query in m.get("name", "").lower()
+        ]
+        self._rows = []
+        if not query:
+            free = [m for m in shown if m.get("base_url")]
+            paid = [m for m in shown if not m.get("base_url")]
+            if free:
+                self._rows.append(("section", "— Free —"))
+                self._rows.extend(("model", m) for m in free)
+            if paid:
+                self._rows.append(("section", "— Paid —"))
+                self._rows.extend(("model", m) for m in paid)
+        else:
+            self._rows.extend(("model", m) for m in shown)
+        list_view = self.query_one("#model-list", ListView)
+        list_view.remove_children()
+        for kind, payload in self._rows:
+            if kind == "section":
+                list_view.mount(ListItem(Label(str(payload), classes="model-section")))
+            else:
+                list_view.mount(self._model_item(payload))  # type: ignore[arg-type]
+        self._jump_to_active()
+
+    @on(Input.Changed)
+    def _on_filter_changed(self, event: Input.Changed) -> None:
+        self._query = event.value
+        self._rebuild_rows()
+
+    @on(Input.Submitted)
+    def _on_filter_submitted(self, event: Input.Submitted) -> None:
+        self._select_highlighted()
+
+    @on(ListView.Selected)
+    def _on_selected(self, event: ListView.Selected) -> None:
+        self._select_highlighted()
+
+    def _select_highlighted(self) -> None:
+        index = self.query_one("#model-list", ListView).index
+        if index is None or index >= len(self._rows):
+            return
+        kind, payload = self._rows[index]
+        if kind == "model":
+            self.dismiss(payload["id"])
+
+    def _jump_to_active(self) -> None:
+        """Scroll the highlighted row to the active model (or the first row)."""
+        list_view = self.query_one("#model-list", ListView)
+        target = 0
+        for i, (kind, payload) in enumerate(self._rows):
+            if kind == "model" and payload["id"] == self._active_id:  # type: ignore[index]
+                target = i
+                break
+        if target < len(self._rows):
+            list_view.index = target
+
+    def _move(self, step: int) -> None:
+        """Move the highlight, skipping section headers."""
+        list_view = self.query_one("#model-list", ListView)
+        index = list_view.index if list_view.index is not None else 0
+        n = len(self._rows)
+        for _ in range(n):
+            index = (index + step) % n
+            kind, _ = self._rows[index]
+            if kind == "model":
+                list_view.index = index
+                return
+
+    def action_list_up(self) -> None:
+        self._move(-1)
+
+    def action_list_down(self) -> None:
+        self._move(1)
+
+    def on_mount(self) -> None:
+        self._rebuild_rows()
+        self.query_one("#model-filter", Input).focus()
 
     @staticmethod
     def _price_line(model: dict) -> str:
@@ -780,7 +876,7 @@ class ModelsScreen(ModalScreen[str | None]):
             return "free"
         return f"${input_per_m:.3g} in · ${output_per_m:.3g} out per 1M"
 
-    def _row(self, model: dict) -> ListItem:
+    def _model_item(self, model: dict) -> ListItem:
         mid = model.get("id", "")
         is_active = mid == self._active_id
         name_label = Label(
@@ -794,14 +890,6 @@ class ModelsScreen(ModalScreen[str | None]):
                 Label(f"{mid}  ·  {price}", classes="model-desc"),
             )
         )
-
-    def on_mount(self) -> None:
-        self.query_one("#model-list", ListView).focus()
-
-    @on(ListView.Selected)
-    def _on_selected(self, event: ListView.Selected) -> None:
-        index = self.query_one("#model-list", ListView).index
-        self.dismiss(self._models[index]["id"])
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1237,6 +1325,16 @@ class HarnessTui(App):
     #models-box .connect-title {
         color: $accent;
         text-style: bold;
+    }
+
+    #model-filter {
+        margin-bottom: 1;
+    }
+
+    #model-list .model-section {
+        color: $text-muted;
+        text-style: bold underline;
+        padding: 0 0 0 1;
     }
 
     #model-list {

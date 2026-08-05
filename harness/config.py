@@ -51,7 +51,7 @@ INPUT_COST_PER_M = 0.14
 OUTPUT_COST_PER_M = 0.28
 CACHE_READ_COST_PER_M = 0.0028
 
-# Model catalog — verified against the local opencode cache
+# Model catalog — refreshed against the local opencode cache
 # (~/.cache/opencode/models.json; prices in USD per 1M tokens).
 # Sorted free first, then ascending by price. deepseek-v4-flash is the
 # shipped default (MODEL_ID). Paid models route to BASE_URL (opencode-go);
@@ -71,7 +71,19 @@ MODELS: list[dict] = [
     {"id": "glm-4.7-free", "name": "GLM-4.7 (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
     {"id": "nemotron-3-super-free", "name": "Nemotron 3 Super (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
     {"id": "north-mini-code-free", "name": "North Mini Code (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
-    # -- paid, ascending --
+    {"id": "trinity-large-preview-free", "name": "Trinity Large Preview (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "hy3-preview-free", "name": "Hy3 Preview (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "ling-3.0-flash-free", "name": "Ling-3.0 Flash (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "laguna-s-2.1-free", "name": "Laguna S 2.1 (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "mimo-v2-omni-free", "name": "MiMo V2 Omni (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "minimax-m2.1-free", "name": "MiniMax-M2.1 (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "mimo-v2-flash-free", "name": "MiMo V2 Flash (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "grok-code", "name": "Grok Code Fast 1 (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "big-pickle", "name": "Big Pickle (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "nemotron-3-ultra-free", "name": "Nemotron 3 Ultra (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "ring-2.6-1t-free", "name": "Ring 2.6 1T (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    {"id": "ling-2.6-flash-free", "name": "Ling 2.6 Flash (Free)", "input_per_m": 0.0, "output_per_m": 0.0, "base_url": FREE_BASE_URL},
+    # -- paid (opencode-go), ascending --
     {"id": "gpt-5.6-luna", "name": "GPT-5.6 Luna", "input_per_m": 0.1, "output_per_m": 0.6},
     {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "input_per_m": 0.14, "output_per_m": 0.28},
     {"id": "mimo-v2.5", "name": "MiMo V2.5", "input_per_m": 0.14, "output_per_m": 0.28},
@@ -83,6 +95,7 @@ MODELS: list[dict] = [
     {"id": "qwen3.7-plus", "name": "Qwen3.7 Plus", "input_per_m": 0.4, "output_per_m": 1.6},
     {"id": "mimo-v2-omni", "name": "MiMo V2 Omni", "input_per_m": 0.4, "output_per_m": 2.0},
     {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "input_per_m": 0.435, "output_per_m": 0.87},
+    {"id": "mimo-v2.5-pro", "name": "MiMo V2.5 Pro", "input_per_m": 0.435, "output_per_m": 0.87},
     {"id": "qwen3.6-plus", "name": "Qwen3.6 Plus", "input_per_m": 0.5, "output_per_m": 3.0},
     {"id": "kimi-k2.5", "name": "Kimi K2.5", "input_per_m": 0.6, "output_per_m": 3.0},
     {"id": "kimi-k2.6", "name": "Kimi K2.6", "input_per_m": 0.95, "output_per_m": 4.0},

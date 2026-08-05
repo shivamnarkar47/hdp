@@ -112,5 +112,8 @@ Termaid diagrams now mount INLINE at their fence positions: turn end splits the 
 
 ## 2026-08-06 — kaal update tarball fallback
 `kaal update` without git now does what install.sh's curl fallback does: fetch the main-branch tarball (urllib, filter="data" extraction), clear known code locations, overlay, keep .venv/unknown files, rebuild. `_resolve_checkout` accepts git-less checkouts (pyproject.toml marker) so tarball-installed dirs update. Suite: 297 green.
+
+## 2026-08-06 — catalog refresh + /models UX
+MODELS refreshed from ~/.cache/opencode/models.json: 48 entries (24 free zen/v1 + 24 paid opencode-go; new: mimo-v2.5-pro, trinity-large-preview-free, ling/laguna/ring/nemotron-ultra free, grok-code, big-pickle, …). /models modal upgraded: filter input (name/id substring), non-selectable Free/Paid section headers, active model ✓ + scrolled into view on open, ↑/↓ skip headers, Enter from filter activates.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

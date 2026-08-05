@@ -1174,22 +1174,36 @@ class TestTui(unittest.TestCase):
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, ModelsScreen)
-                list_view = app.screen.query_one("#model-list", ListView)
-                self.assertEqual(len(list_view.children), len(config.MODELS))
-                first = str(list_view.children[0].query_one(Label).render())
+                screen = app.screen
+                list_view = screen.query_one("#model-list", ListView)
+                # 48 models + 2 section headers, free section first.
+                self.assertEqual(len(list_view.children), len(config.MODELS) + 2)
+                self.assertEqual(screen._rows[0], ("section", "— Free —"))
+                first = str(list_view.children[1].query_one(Label).render())
                 self.assertIn("DeepSeek V4 Flash (Free)", first)
                 rows = " ".join(
                     str(item.query_one(Label).render()) for item in list_view.children
                 )
                 self.assertIn("free", rows.lower())
-                # The active (default) row is marked ✓.
-                active_idx = config.MODELS.index(
-                    next(m for m in config.MODELS if m["id"] == app.model_id)
+                # The active (default) row is marked ✓ and scrolled into view.
+                active_row = next(
+                    i
+                    for i, (kind, payload) in enumerate(screen._rows)
+                    if kind == "model" and payload["id"] == app.model_id
                 )
-                active = str(list_view.children[active_idx].query_one(Label).render())
+                self.assertEqual(list_view.index, active_row)
+                active = str(list_view.children[active_row].query_one(Label).render())
                 self.assertTrue(active.startswith("✓"))
-                # Switch to the free flash tier (index 0).
-                list_view.index = 0
+                # Filter to the free tier and switch to the free flash.
+                filter_input = screen.query_one("#model-filter", Input)
+                filter_input.value = "flash"
+                await pilot.pause()
+                self.assertLess(len(screen._rows), len(config.MODELS))
+                list_view.index = next(
+                    i
+                    for i, (kind, payload) in enumerate(screen._rows)
+                    if kind == "model" and payload["id"] == "deepseek-v4-flash-free"
+                )
                 await pilot.pause()
                 await pilot.press("enter")
                 await pilot.pause()
