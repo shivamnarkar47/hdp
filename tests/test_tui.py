@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, ListView, Static, TextArea
 
 from harness import agents, config, sessions
@@ -1088,6 +1088,65 @@ class TestTui(unittest.TestCase):
                     "termaid not installed", "\n".join(app.transcript)
                 )
                 self.assertEqual(len(app.query(".diagram-box")), 0)
+
+        asyncio.run(flow())
+
+    def test_topbar_hidden_by_default_and_toggle(self):
+        """Minimalistic default: the top bar starts hidden; Ctrl+T shows it
+        and hides it again."""
+        async def flow() -> None:
+            app = self._app()
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                self.assertIs(app._topbar_visible, False)
+                self.assertFalse(app.query_one("#topbar", Horizontal).display)
+                await pilot.press("ctrl+t")
+                await pilot.pause()
+                self.assertIs(app._topbar_visible, True)
+                self.assertTrue(app.query_one("#topbar", Horizontal).display)
+                self.assertIn("topbar shown", "\n".join(app.transcript))
+                await pilot.press("ctrl+t")
+                await pilot.pause()
+                self.assertIs(app._topbar_visible, False)
+                self.assertFalse(app.query_one("#topbar", Horizontal).display)
+
+        asyncio.run(flow())
+
+    def test_diagrams_toggle_off_removes_boxes_and_skips_render(self):
+        """Ctrl+D turns auto-render off: existing diagram boxes are removed
+        and later turns keep fences as plain code (no termaid run)."""
+        answer = "```mermaid\nflowchart LR\n  A --> B\n```\n"
+
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FakeGateway(
+                    [("content", answer), ("done", "stop")],
+                    [("content", answer), ("done", "stop")],
+                ),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                fake = mock.Mock(returncode=0, stdout="A --> B\n", stderr="")
+                with mock.patch(
+                    "harness.tui.shutil.which", return_value="/usr/bin/termaid"
+                ), mock.patch("harness.tui.subprocess.run", return_value=fake) as run:
+                    await self._submit_and_wait(app, "draw", pilot)
+                    for _ in range(100):
+                        if app.query(".diagram-box"):
+                            break
+                        await pilot.pause(0.05)
+                    self.assertEqual(len(app.query(".diagram-box")), 1)
+                    # Switch diagrams off: the rendered box disappears.
+                    await pilot.press("ctrl+d")
+                    await pilot.pause()
+                    self.assertIn("diagrams off", "\n".join(app.transcript))
+                    self.assertEqual(len(app.query(".diagram-box")), 0)
+                    # Next turn: fence stays code, no termaid run.
+                    await self._submit_and_wait(app, "draw again", pilot)
+                    await pilot.pause()
+                    self.assertEqual(len(app.query(".diagram-box")), 0)
+                    self.assertEqual(run.call_count, 1)  # only the first turn
 
         asyncio.run(flow())
 

@@ -100,5 +100,8 @@ TUI turn end scans the finished markdown for ```mermaid fences and pipes each to
 
 ## 2026-08-04 — update rebuilds on pull
 `kaal update` now rebuilds (pip/uv install . into the checkout venv) ONLY when the pull brought a new commit; up-to-date runs skip the rebuild; a pulled checkout with no .venv errors with a re-run-install.sh hint. Tests assert exactly one rebuild command and its skip on the second run. Suite: 285 green.
+
+## 2026-08-04 — inline diagrams + minimalistic mode
+Termaid diagrams now mount INLINE at their fence positions: turn end splits the answer at each ```mermaid fence, renders all fences in one worker, and rebuilds the assistant block as interleaved markdown windows + diagram boxes. Switchable: Ctrl+D / /diagrams (priority binding, TextArea's ctrl+d delete-right overridden; Del still works). Top bar hidden by default (minimalistic), Ctrl+T / /topbar shows it. Suite: 287 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

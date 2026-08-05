@@ -190,7 +190,9 @@ COMMANDS = [
     "/model",
     "/verbose",
     "/sidebar",
+    "/topbar",
     "/diagram",
+    "/diagrams",
     "/connect",
     "/quit",
     "/structure",
@@ -1193,6 +1195,12 @@ class HarnessTui(App):
         # Plain app-level binding is enough: TextArea never binds Ctrl+S, so
         # the unhandled key bubbles up from the focused prompt to the App.
         Binding("ctrl+s", "toggle_sidebar", "Sidebar", show=False),
+        # Ctrl+T: minimalistic mode — the top bar starts hidden and this key
+        # brings it back. Ctrl+D: switch the auto-rendered diagrams on/off.
+        # priority=True: TextArea binds ctrl+d to delete-right; the harness
+        # owns the key (like Ctrl+G), the Del key still deletes right.
+        Binding("ctrl+t", "toggle_topbar", "Top bar", show=False),
+        Binding("ctrl+d", "toggle_diagrams", "Diagrams", show=False, priority=True),
         # Ctrl+G ("generate") opens the AI agent generator. priority=True so it
         # wins even while the prompt has focus: TextArea binds Ctrl+A to
         # cursor_line_start (select-all territory), so Ctrl+A would be
@@ -1264,6 +1272,10 @@ class HarnessTui(App):
         # Session-only preference (NOT persisted): the sidebar always starts
         # visible; Ctrl+S / /sidebar hide or show it for this session.
         self._sidebar_visible = True
+        # Minimalistic by default: the top bar starts hidden; Ctrl+T shows it.
+        self._topbar_visible = False
+        # Auto-render of mermaid fences (Ctrl+D / /diagrams toggles).
+        self._diagrams_enabled = True
         self._tool_count = len(self.tools.schemas())
         self._steps = 0
 
@@ -1359,8 +1371,10 @@ class HarnessTui(App):
         self._send_button = self.query_one("#send-button", Button)
         self._composer_state = self.query_one("#composer-state", Static)
         self._suggestions = self.query_one("#suggestions", Vertical)
-        # Apply the session state (covers a pre-mount action_toggle_sidebar).
+        # Apply the session state (covers pre-mount action_toggle_sidebar and
+        # the minimalistic hidden-by-default top bar).
         self.query_one("#sidebar", Vertical).display = self._sidebar_visible
+        self.query_one("#topbar", Horizontal).display = self._topbar_visible
         self._render_home()
         self._structure_notice()
         self._conversation.scroll_to(y=0, animate=False)
@@ -1949,12 +1963,48 @@ class HarnessTui(App):
         self._conversation.mount(Static(text, classes=classes, markup=False))
         self._scroll_follow()
 
+    @staticmethod
+    def _split_mermaid(text: str) -> list[tuple[str, str]]:
+        """Split markdown at every ```mermaid fence into interleaved
+        ("md", segment) and ("mermaid", source) parts, so a rendered diagram
+        can sit exactly where the code block was."""
+        parts: list[tuple[str, str]] = []
+        pos = 0
+        for match in _MERMAID_FENCE_RE.finditer(text):
+            if match.start() > pos:
+                parts.append(("md", text[pos : match.start()]))
+            parts.append(("mermaid", match.group(1)))
+            pos = match.end()
+        if pos < len(text):
+            parts.append(("md", text[pos:]))
+        return parts
+
+    def _mount_md_window(self, text: str) -> None:
+        """Mount `text` as one or more bounded markdown windows (windowed
+        rendering: per-flush cost stays bounded on long segments)."""
+        while text:
+            if len(text) <= MD_WINDOW_CHARS:
+                win = Markdown(text, classes="assistant-md")
+                self._md_windows.append(win)
+                self._conversation.mount(win)
+                return
+            cut = text.rfind("\n\n", 0, MD_WINDOW_CHARS + 1)
+            if cut <= 0:
+                cut = MD_WINDOW_CHARS
+            else:
+                cut += 2  # keep the paragraph break with the closed window
+            closed, text = _close_md_window(text, cut)
+            win = Markdown(closed, classes="assistant-md")
+            self._md_windows.append(win)
+            self._conversation.mount(win)
+
     def _render_mermaid_diagrams(self) -> None:
         """Auto-convert every mermaid fence in the finished turn's markdown:
-        each fence is piped to termaid on a worker thread and the Unicode art
-        is mounted below the assistant block. The transcript keeps the
-        verbatim source; only the widget gains the art."""
-        if not self._md_windows:
+        all fences render on one worker thread, then the assistant block is
+        rebuilt with each diagram box placed exactly where its code fence
+        was. The transcript keeps the verbatim source; only widgets gain art.
+        Switchable: off means the fences stay as code, nothing is rendered."""
+        if not self._diagrams_enabled or not self._md_windows:
             return
         fences = _MERMAID_FENCE_RE.findall(self._turn_md_text)
         if not fences:
@@ -1965,36 +2015,53 @@ class HarnessTui(App):
                 classes="notice",
             )
             return
-        for i, source in enumerate(fences[:MAX_DIAGRAMS_PER_TURN]):
-            threading.Thread(
-                target=self._diagram_worker, args=(i, source), daemon=True
-            ).start()
+        threading.Thread(
+            target=self._diagram_worker, args=(fences,), daemon=True
+        ).start()
 
-    def _diagram_worker(self, index: int, source: str) -> None:
-        """Worker thread: render one fence via termaid (stdin). Never touches
-        widgets — the art is marshaled back through call_from_thread."""
-        try:
-            proc = subprocess.run(
-                ["termaid"], input=source, capture_output=True, text=True, timeout=60
-            )
-            art = proc.stdout if proc.returncode == 0 else ""
-            err = (proc.stderr or proc.stdout).strip()
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            art, err = "", str(exc)
-        self.call_from_thread(self._on_diagram_done, index, art, err)
+    def _diagram_worker(self, fences: list[str]) -> None:
+        """Worker thread: render every fence via termaid (stdin), in order.
+        Never touches widgets — the arts are marshaled back together."""
+        arts: list[tuple[str, str]] = []
+        for source in fences[:MAX_DIAGRAMS_PER_TURN]:
+            try:
+                proc = subprocess.run(
+                    ["termaid"],
+                    input=source,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                art = proc.stdout if proc.returncode == 0 else ""
+                err = (proc.stderr or proc.stdout).strip()
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                art, err = "", str(exc)
+            arts.append((art, err))
+        self.call_from_thread(self._on_diagrams_done, arts)
 
-    def _on_diagram_done(self, index: int, art: str, err: str) -> None:
-        """Main thread: mount the rendered diagram below the assistant block."""
+    def _on_diagrams_done(self, arts: list[tuple[str, str]]) -> None:
+        """Main thread: rebuild the assistant block, interleaving the markdown
+        segments and the rendered diagrams in code order."""
         if self._cancel_turn or self._conversation is None:
             return
-        if not art:
-            self._write_line(f"diagram: render failed: {err}", classes="notice")
-            return
-        box = Static(art, classes="diagram-box", markup=False)
-        if self._md_windows:
-            self._conversation.mount(box, after=self._md_windows[-1])
-        else:
-            self._conversation.mount(box)
+        for win in self._md_windows:
+            win.remove()
+        self._md_windows = []
+        fence_i = 0
+        failed = False
+        for kind, content in self._split_mermaid(self._turn_md_text):
+            if kind == "md":
+                self._mount_md_window(content)
+                continue
+            art, err = arts[fence_i] if fence_i < len(arts) else ("", "")
+            fence_i += 1
+            if art:
+                self._conversation.mount(
+                    Static(art, classes="diagram-box", markup=False)
+                )
+            elif err and not failed:
+                failed = True
+                self._write_line(f"diagram: render failed: {err}", classes="notice")
         self._scroll_follow()
 
     def _render_diagram(self, path: str) -> None:
@@ -2484,6 +2551,28 @@ class HarnessTui(App):
             classes="notice",
         )
 
+    def action_toggle_topbar(self) -> None:
+        """Ctrl+T / /topbar: hide or show the top bar (minimalistic default:
+        hidden, so the conversation owns the full screen)."""
+        self._topbar_visible = not self._topbar_visible
+        self.query_one("#topbar", Horizontal).display = self._topbar_visible
+        self._write_line(
+            "topbar hidden" if not self._topbar_visible else "topbar shown",
+            classes="notice",
+        )
+
+    def action_toggle_diagrams(self) -> None:
+        """Ctrl+D / /diagrams: switch the auto-rendered termaid diagrams on or
+        off. Off means fences stay as code and any rendered boxes are removed."""
+        self._diagrams_enabled = not self._diagrams_enabled
+        if not self._diagrams_enabled:
+            for box in list(self.query(".diagram-box")):
+                box.remove()
+        self._write_line(
+            "diagrams on" if self._diagrams_enabled else "diagrams off",
+            classes="notice",
+        )
+
     # -- slash commands -----------------------------------------------------
 
     def _run_command(self, text: str) -> None:
@@ -2555,6 +2644,10 @@ class HarnessTui(App):
                 self._write_line("usage: /diagram <file.mmd>", classes="notice")
             else:
                 self._render_diagram(arg)
+        elif cmd == "/diagrams":
+            self.action_toggle_diagrams()
+        elif cmd == "/topbar":
+            self.action_toggle_topbar()
         elif cmd == "/sidebar":
             self.action_toggle_sidebar()
         elif cmd == "/quit":
