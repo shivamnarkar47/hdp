@@ -892,18 +892,23 @@ class TestTui(unittest.TestCase):
             app = self._app()
             async with app.run_test() as pilot:
                 await pilot.pause()
-                # Sidebar starts visible.
+                # Minimalistic default: the sidebar starts hidden.
+                self.assertIs(app._sidebar_visible, False)
+                self.assertFalse(app.query_one("#sidebar", Vertical).display)
+
+                # App-level Ctrl+S shows it (TextArea never binds Ctrl+S).
+                await pilot.press("ctrl+s")
+                await pilot.pause()
                 self.assertIs(app._sidebar_visible, True)
                 self.assertTrue(app.query_one("#sidebar", Vertical).display)
+                self.assertIn("sidebar shown", "\n".join(app.transcript))
 
-                # App-level Ctrl+S hides it (TextArea never binds Ctrl+S).
+                # Ctrl+S hides it again; the conversation pane still runs a
+                # full turn while hidden.
                 await pilot.press("ctrl+s")
                 await pilot.pause()
                 self.assertIs(app._sidebar_visible, False)
                 self.assertFalse(app.query_one("#sidebar", Vertical).display)
-                self.assertIn("sidebar hidden", "\n".join(app.transcript))
-
-                # The conversation pane still runs a full turn while hidden.
                 await self._submit_and_wait(app, "write hello.txt", pilot)
                 self.assertFalse(app.turn_active)
                 self.assertIn("Wrote hello.txt.", "\n".join(app.transcript))

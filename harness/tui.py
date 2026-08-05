@@ -1500,9 +1500,9 @@ class HarnessTui(App):
         self._composer_state: Static | None = None
         self._conversation: ConversationScroll | None = None
         self._trace: VerticalScroll | None = None
-        # Session-only preference (NOT persisted): the sidebar always starts
-        # visible; Ctrl+S / /sidebar hide or show it for this session.
-        self._sidebar_visible = True
+        # Session-only preference (NOT persisted): the sidebar starts hidden
+        # (minimalistic, like the top bar); Ctrl+S / /sidebar shows it.
+        self._sidebar_visible = False
         # Minimalistic by default: the top bar starts hidden; Ctrl+T shows it.
         self._topbar_visible = False
         # Auto-render of mermaid fences (Ctrl+D / /diagrams toggles).
