@@ -42,9 +42,11 @@ from harness.tools import (
     resolve_relative,
 )
 
-# Prompt budget: the wire history must leave MAX_OUTPUT_TOKENS of headroom
-# for the model's reply (CONTEXT_WINDOW - MAX_OUTPUT_TOKENS == 616_000).
-PROMPT_BUDGET = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS
+# Prompt budget: how much wire history is sent per request. Explicit, NOT
+# derived from the window: the model catalog advertises a 1M context, but
+# requests that big are slow. 128k keeps each round trip light while still
+# carrying a long working session; truncation drops old turns past it.
+PROMPT_BUDGET = 128_000
 
 # Tools that may run concurrently in a batch: the parallel pool is strictly
 # the read-only trio. Everything else — mutators (write/edit/bash/
@@ -311,7 +313,7 @@ class AgentLoop:
                 self._messages = truncate_history(
                     self._messages,
                     self._system,
-                    (CONTEXT_WINDOW - MAX_OUTPUT_TOKENS) // 2,
+                    PROMPT_BUDGET // 2,
                 )
                 # The wire cache must reflect the truncated history BEFORE the
                 # retry stream call.

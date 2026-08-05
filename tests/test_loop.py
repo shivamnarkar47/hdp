@@ -10,9 +10,8 @@ import time
 import unittest
 from pathlib import Path
 
-from harness.config import CONTEXT_WINDOW, MAX_OUTPUT_TOKENS
 from harness.context import wire_token_count
-from harness.loop import AgentLoop, LoopError
+from harness.loop import PROMPT_BUDGET, AgentLoop, LoopError
 from harness.memory import Memory
 from harness.messages import ToolCall, to_wire_messages
 from harness.sessions import append_event, load_messages, read_events
@@ -322,8 +321,8 @@ class TestAgentLoop(unittest.TestCase):
         tool result) so the loop's own small prompt is the protected last user
         message; truncate_history can then drop the oversized turn.
         """
-        budget = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS
-        big = "x" * 700_000  # ~233k tokens per message; 3 messages blow past 616k
+        budget = PROMPT_BUDGET
+        big = "x" * 700_000  # ~233k tokens per message; 3 messages blow past 128k
         append_event(self.session_id, {"type": "user", "data": {"content": big}})
         append_event(self.session_id, {"type": "assistant", "data": {"content": big}})
         append_event(

@@ -65,7 +65,7 @@ class TestContext(unittest.TestCase):
 
     def test_budget_boundary(self):
         headroom = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS
-        self.assertEqual(headroom, 616_000)
+        self.assertEqual(headroom, 968_000)
         self.assertTrue(context_budget(headroom))
         self.assertFalse(context_budget(headroom + 1))
 

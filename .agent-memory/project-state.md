@@ -75,3 +75,15 @@ session: Hey → ok
 
 ## 2026-08-03 00:12
 session: What's the tradeoffs now → ok
+
+
+## 2026-08-04 — TUI workbench redesign
+Rebuilt `harness/tui.py` around a compact session bar, framed conversation, context sidebar, compact composer, explicit Send/Cancel state, and clickable empty-state starters. Navigation locks during turns; session and agent context refresh outside the transcript. Added two interaction tests in `tests/test_tui.py`; full suite: 251 tests green.
+
+## 2026-08-04 — home hero art + voice doctrine
+Home screen now leads with the KAAL figlet wordmark (`KAAL_LOGO`) plus a simple Panchajanya conch (`MAHABHARATA_ART`) in `harness/art.py`, mirrored into the transcript. AGENTS.md gains §0 Voice & Output Doctrine: epic Mahabharata cadence in plain modern English (never pseudo-archaic) + strict i-have-adhd skill mandate with condensed core rules inlined; skill installed at `~/.agents/skills/i-have-adhd/SKILL.md` (visible to new sessions). Suite: 251 green.
+
+## 2026-08-04 — response latency fixes
+MAX_OUTPUT_TOKENS 384k → 32k (bounds runaway reasoning, the dominant slow-response cost; 32k ≈ 96k chars keeps big tool payloads working). PROMPT_BUDGET now explicit 128k, not window-derived (was 616k); overflow-retry truncation uses PROMPT_BUDGET//2. TUI streams reasoning live (transcript mirror stays verbose-only). Tests updated (test_context boundary 968k, test_loop uses PROMPT_BUDGET). Suite: 275 green.
+## 2026-08-04 00:58
+session: Help me plan the next feature for this project. → ok

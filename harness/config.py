@@ -23,8 +23,12 @@ CHAT_COMPLETIONS_URL = f"{BASE_URL}/chat/completions"
 MODEL_ID = "deepseek-v4-flash"
 
 # Model limits (catalog: contextWindow / maxTokens).
+# MAX_OUTPUT_TOKENS is deliberately capped well below the catalog's 384k:
+# an unbounded output budget lets the model's reasoning run away (the
+# dominant cost of a slow response). 32k ≈ 96k chars — still room for big
+# tool-call payloads; raise only if large file writes truncate.
 CONTEXT_WINDOW = 1_000_000
-MAX_OUTPUT_TOKENS = 384_000
+MAX_OUTPUT_TOKENS = 32_000
 
 # Reasoning is streamed in this delta field (catalog: reasoningContentField).
 REASONING_FIELD = "reasoning_content"

@@ -1640,8 +1640,10 @@ class HarnessTui(App):
             self._append_content(event[1])  # type: ignore[arg-type]
         elif kind == "reasoning":
             self._show_thinking()
-            if self.verbose:
-                self._append_reasoning(event[1])  # type: ignore[arg-type]
+            # Always show reasoning live: it is the visible proof the model
+            # is working, not stalled. The transcript mirror stays verbose-
+            # only so plain-text replay keeps the answer, not the thinking.
+            self._append_reasoning(event[1], mirror=self.verbose)  # type: ignore[arg-type]
         elif kind == "tool_start":
             self._on_tool_start(event[1])  # type: ignore[arg-type]
         elif kind == "tool_result":
@@ -1776,8 +1778,9 @@ class HarnessTui(App):
                 self._md_window_text[i] = repaired
                 self._md_windows[i].update(repaired)
 
-    def _append_reasoning(self, chunk: str) -> None:
-        self.transcript.append(f"💭 {chunk}")
+    def _append_reasoning(self, chunk: str, mirror: bool = True) -> None:
+        if mirror:
+            self.transcript.append(f"💭 {chunk}")
         self._reasoning_text += chunk
         if self._reasoning is None:
             self._reasoning = Static("", classes="reasoning", markup=False)
