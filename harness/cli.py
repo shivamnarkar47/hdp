@@ -207,22 +207,31 @@ def _update(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError) as exc:
         print(f"kaal: update failed: {exc}", file=sys.stderr)
         return 1
-    venv_python = checkout / ".venv" / "bin" / "python"
-    if venv_python.is_file():
-        try:
-            if shutil.which("uv"):
-                _run_cmd(
-                    ["uv", "pip", "install", "--python", str(venv_python), "."], checkout
-                )
-            else:
-                _run_cmd([str(venv_python), "-m", "pip", "install", "."], checkout)
-        except (OSError, RuntimeError) as exc:
-            print(f"kaal: pulled, but reinstall failed: {exc}", file=sys.stderr)
-            return 1
     if before == after:
         print(f"kaal is up to date ({after}).")
-    else:
-        print(f"kaal updated: {before} -> {after} ({subject})")
+        return 0
+    # New commit pulled: rebuild the program into the checkout's venv — the
+    # same install step install.sh performs, so the running installation and
+    # the checkout can never drift.
+    venv_python = checkout / ".venv" / "bin" / "python"
+    if not venv_python.is_file():
+        print(
+            "kaal: pulled, but no .venv in the checkout — re-run install.sh",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        if shutil.which("uv"):
+            _run_cmd(
+                ["uv", "pip", "install", "--python", str(venv_python), "."], checkout
+            )
+        else:
+            _run_cmd([str(venv_python), "-m", "pip", "install", "."], checkout)
+    except (OSError, RuntimeError) as exc:
+        print(f"kaal: pulled, but rebuild failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"kaal updated: {before} -> {after} ({subject})")
+    print("kaal rebuilt into .venv — restart kaal to use the new build.")
     return 0
 
 

@@ -312,9 +312,10 @@ class TestCli(unittest.TestCase):
     def _git(self, cwd: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
-    def test_update_pulls_newer_commit(self):
-        """`kaal update` pulls origin into the checkout and reports the new
-        commit; a second run is up to date."""
+    def test_update_pulls_and_rebuilds(self):
+        """`kaal update` pulls origin, then REBUILDS the program into the
+        checkout venv (a real pip/uv install); a second run is up to date
+        and skips the rebuild."""
         from harness import cli
 
         origin = self.tempdir / "origin"
@@ -331,24 +332,78 @@ class TestCli(unittest.TestCase):
         (origin / "v.txt").write_text("two")
         self._git(origin, "add", ".")
         self._git(origin, "commit", "-qm", "v2")
+        # The checkout looks installed: a venv python exists.
+        venv_python = checkout / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n")
+        venv_python.chmod(0o755)
+
+        real_run = cli._run_cmd
+        real_which = cli.shutil.which
+        rebuild_calls: list[list[str]] = []
+
+        def fake_run(cmd, cwd):
+            if cmd[-2:] == ["install", "."]:
+                rebuild_calls.append(cmd)
+                return ""
+            return real_run(cmd, cwd)
+
+        def fake_which(name):
+            if name == "uv":
+                return None  # force the pip rebuild path
+            return real_which(name)
 
         args = mock.Mock()
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}):
+        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}), mock.patch.object(
+            cli, "_run_cmd", side_effect=fake_run
+        ), mock.patch.object(cli.shutil, "which", side_effect=fake_which):
             with contextlib.redirect_stdout(out):
                 code = cli._update(args)
         self.assertEqual(code, 0)
         self.assertEqual((checkout / "v.txt").read_text(), "two")
         self.assertIn("kaal updated:", out.getvalue())
         self.assertIn("v2", out.getvalue())
+        self.assertIn("rebuilt into .venv", out.getvalue())
+        # The rebuild ran exactly once: pip install . into the checkout venv.
+        self.assertEqual(len(rebuild_calls), 1)
+        self.assertEqual(rebuild_calls[0][-2:], ["install", "."])
 
-        # Second run: nothing new upstream.
+        # Second run: nothing new upstream -> no rebuild.
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}):
+        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}), mock.patch.object(
+            cli, "_run_cmd", side_effect=fake_run
+        ), mock.patch.object(cli.shutil, "which", side_effect=fake_which):
             with contextlib.redirect_stdout(out):
                 code = cli._update(args)
         self.assertEqual(code, 0)
         self.assertIn("kaal is up to date", out.getvalue())
+        self.assertEqual(len(rebuild_calls), 1)  # still exactly one rebuild
+
+    def test_update_pull_without_venv_tells_user(self):
+        """A pull with no .venv in the checkout: clear error, exit 1."""
+        from harness import cli
+
+        origin = self.tempdir / "origin"
+        origin.mkdir()
+        self._git(origin, "init", "-q")
+        self._git(origin, "config", "user.email", "t@example.com")
+        self._git(origin, "config", "user.name", "t")
+        (origin / "v.txt").write_text("one")
+        self._git(origin, "add", ".")
+        self._git(origin, "commit", "-qm", "v1")
+        checkout = self.tempdir / "checkout"
+        self._git(self.tempdir, "clone", "-q", str(origin), str(checkout))
+        (origin / "v.txt").write_text("two")
+        self._git(origin, "add", ".")
+        self._git(origin, "commit", "-qm", "v2")
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"KAAL_INSTALL_DIR": str(checkout)}):
+            with mock.patch("sys.stderr", new=err):
+                code = cli._update(mock.Mock())
+        self.assertEqual(code, 1)
+        self.assertIn("no .venv in the checkout", err.getvalue())
 
     def test_diagrams_renders_via_termaid(self):
         """`kaal diagrams` pipes the .mmd through a termaid on PATH."""
