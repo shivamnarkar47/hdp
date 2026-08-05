@@ -103,5 +103,8 @@ TUI turn end scans the finished markdown for ```mermaid fences and pipes each to
 
 ## 2026-08-04 — inline diagrams + minimalistic mode
 Termaid diagrams now mount INLINE at their fence positions: turn end splits the answer at each ```mermaid fence, renders all fences in one worker, and rebuilds the assistant block as interleaved markdown windows + diagram boxes. Switchable: Ctrl+D / /diagrams (priority binding, TextArea's ctrl+d delete-right overridden; Del still works). Top bar hidden by default (minimalistic), Ctrl+T / /topbar shows it. Suite: 287 green.
+
+## 2026-08-04 — /models switcher + free tier
+`/models` opens a catalog modal (35 models, sorted free-first then ascending price; each row shows id + `$in · $out per 1M` or `free`); Enter switches, persists as default (`~/.config/kaal/model`), rebuilds the gateway — free-tier models route to the zen/v1 endpoint (FREE_BASE_URL), paid to zen/go/v1. `kaal run` honors the saved default; `--model` flag still wins. Cost estimation uses the active model's rates (free → $0). Catalog verified against ~/.cache/opencode/models.json. Suite: 294 green.
 ## 2026-08-04 00:58
 session: Help me plan the next feature for this project. → ok

@@ -193,6 +193,7 @@ COMMANDS = [
     "/topbar",
     "/diagram",
     "/diagrams",
+    "/models",
     "/connect",
     "/quit",
     "/structure",
@@ -745,6 +746,67 @@ class AskScreen(ModalScreen[str | None]):
         self.dismiss("(cancelled)")
 
 
+class ModelsScreen(ModalScreen[str | None]):
+    """Modal model switcher: Enter activates the highlighted model.
+
+    Each row shows the model name (the active one marked ✓), its id, and the
+    catalog price — "free" for the $0 tier, otherwise `$in in · $out out` per
+    1M tokens. Dismisses with the chosen id, or None on Esc.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+    ]
+
+    def __init__(self, model_list: list[dict], active_id: str | None = None) -> None:
+        super().__init__()
+        self._models = model_list
+        self._active_id = active_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="models-box"):
+            yield Static(f"Models ({len(self._models)})", classes="connect-title")
+            yield ListView(*[self._row(m) for m in self._models], id="model-list")
+            yield Static(
+                "↑/↓ select · Enter activate · Esc close — the choice stays the default",
+                classes="connect-hint",
+            )
+
+    @staticmethod
+    def _price_line(model: dict) -> str:
+        input_per_m = model.get("input_per_m", 0)
+        output_per_m = model.get("output_per_m", 0)
+        if input_per_m == 0 and output_per_m == 0:
+            return "free"
+        return f"${input_per_m:.3g} in · ${output_per_m:.3g} out per 1M"
+
+    def _row(self, model: dict) -> ListItem:
+        mid = model.get("id", "")
+        is_active = mid == self._active_id
+        name_label = Label(
+            (f"✓ {model.get('name', mid)}" if is_active else model.get("name", mid)),
+            classes="model-name active" if is_active else "model-name",
+        )
+        price = self._price_line(model)
+        return ListItem(
+            Vertical(
+                name_label,
+                Label(f"{mid}  ·  {price}", classes="model-desc"),
+            )
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#model-list", ListView).focus()
+
+    @on(ListView.Selected)
+    def _on_selected(self, event: ListView.Selected) -> None:
+        index = self.query_one("#model-list", ListView).index
+        self.dismiss(self._models[index]["id"])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HarnessTui(App):
     """Workbench-style chat TUI for kaal."""
     TITLE = "kaal"
@@ -1080,14 +1142,16 @@ class HarnessTui(App):
     AgentsScreen,
     AgentFormScreen,
     AgentIntentScreen,
-    AskScreen {
+    AskScreen,
+    ModelsScreen {
         align: center middle;
     }
 
     #connect-box,
     #sessions-box,
     #agents-box,
-    #ask-box {
+    #ask-box,
+    #models-box {
         width: 60;
         height: auto;
         max-height: 80%;
@@ -1165,6 +1229,41 @@ class HarnessTui(App):
         text-style: dim;
     }
 
+    #models-box {
+        width: 66;
+        max-height: 70%;
+    }
+
+    #models-box .connect-title {
+        color: $accent;
+        text-style: bold;
+    }
+
+    #model-list {
+        height: auto;
+        max-height: 55%;
+        margin-bottom: 1;
+    }
+
+    #model-list .model-name {
+        text-style: bold;
+    }
+
+    #model-list .model-name.active {
+        color: $accent;
+        text-style: bold underline;
+    }
+
+    #model-list .model-desc {
+        color: $text-muted;
+        text-style: dim;
+    }
+
+    #model-list:focus > .list-item.-highlight .model-name,
+    #model-list:focus > .list-item.-highlight .model-desc {
+        color: $text;
+    }
+
     .connect-title {
         text-style: bold;
         margin-bottom: 1;
@@ -1220,7 +1319,12 @@ class HarnessTui(App):
         super().__init__()
         if gateway is None:
             # config.get_api_key() may SystemExit(1) when no key is configured.
-            gateway = Gateway(config.BASE_URL, config.get_api_key(), model_id or config.MODEL_ID)
+            # The default model honors the saved preference (/models choice
+            # persists until changed); the flag still wins when given.
+            default_model = config.resolve_model_id(model_id)
+            gateway = Gateway(
+                config.model_base_url(default_model), config.get_api_key(), default_model
+            )
         self.gateway = gateway
         self.model_id: str = getattr(gateway, "model_id", None) or model_id or config.MODEL_ID
         self.project_dir = Path(project_dir or Path.cwd())
@@ -2232,6 +2336,36 @@ class HarnessTui(App):
         if key:
             self._set_api_key(key)
 
+    def _on_models_result(self, model_id: str | None) -> None:
+        """Result callback from the /models popup (None = cancelled)."""
+        if model_id:
+            self._set_model(model_id)
+
+    def _set_model(self, model_id: str) -> None:
+        """Switch the active model: persist it as the default, rebuild the
+        gateway (free tier routes to its own endpoint), refresh every place
+        the model is shown, and confirm with the catalog price. The choice
+        stays the default until changed — from the TUI or `kaal run`."""
+        if model_id == self.model_id:
+            self._write_line(f"model: {model_id} (already active)", classes="notice")
+            return
+        config.save_user_model(model_id)
+        self.gateway = Gateway(
+            config.model_base_url(model_id),
+            getattr(self.gateway, "api_key", config.get_api_key()),
+            model_id,
+        )
+        self.model_id = model_id
+        self.sub_title = f"{self.model_id} · {self.session_id}"
+        rates = config.model_rates(model_id)
+        price = "free" if rates == (0.0, 0.0) else f"${rates[0]:.3g} in / ${rates[1]:.3g} out per 1M"
+        self._write_line(
+            f"model: {model_id} ({price}) — default until changed", classes="notice"
+        )
+        self._render_topbar()
+        self._render_context()
+        self._render_status()
+
     # -- agents -------------------------------------------------------------
 
     def _on_agents_result(self, result: tuple[str, str] | str | None) -> None:
@@ -2644,6 +2778,12 @@ class HarnessTui(App):
                 self._write_line("usage: /diagram <file.mmd>", classes="notice")
             else:
                 self._render_diagram(arg)
+        elif cmd == "/models":
+            if len(self.screen_stack) > 1:
+                return  # a modal is already up; don't stack another
+            self.push_screen(
+                ModelsScreen(config.MODELS, self.model_id), self._on_models_result
+            )
         elif cmd == "/diagrams":
             self.action_toggle_diagrams()
         elif cmd == "/topbar":

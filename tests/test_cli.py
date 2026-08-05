@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from harness import sessions
+from harness import config, sessions
 from harness.cli import main
 from harness.toolcache import ToolCache
 
@@ -41,6 +41,8 @@ class TestCli(unittest.TestCase):
         self.tempdir = Path(self._tmp.name)
         self._old_sessions_dir = os.environ.get("KAAL_SESSIONS_DIR")
         os.environ["KAAL_SESSIONS_DIR"] = str(self.tempdir / "sessions")
+        self._old_xdg = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.tempdir / "config")
         self._old_key = os.environ.get("OPENCODE_API_KEY")
         os.environ["OPENCODE_API_KEY"] = "test-key"
 
@@ -49,6 +51,10 @@ class TestCli(unittest.TestCase):
             os.environ.pop("KAAL_SESSIONS_DIR", None)
         else:
             os.environ["KAAL_SESSIONS_DIR"] = self._old_sessions_dir
+        if self._old_xdg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self._old_xdg
         if self._old_key is None:
             os.environ.pop("OPENCODE_API_KEY", None)
         else:
@@ -437,6 +443,35 @@ class TestCli(unittest.TestCase):
                 code = cli._update(mock.Mock())
         self.assertEqual(code, 1)
         self.assertIn("no kaal checkout", err.getvalue())
+
+    def test_run_uses_saved_default_model(self):
+        """No --model flag: the saved default model and its endpoint are used;
+        the explicit flag still wins when given."""
+        class FakeAgentLoop:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self, prompt, emit=None):
+                return "hi"
+
+        gateway = FakeGateway([("content", "hi"), ("done", "stop")])
+        config.save_user_model("deepseek-v4-pro")
+        with mock.patch("harness.cli.Gateway", return_value=gateway) as gw, mock.patch(
+            "harness.cli.AgentLoop", FakeAgentLoop
+        ):
+            code, _, _ = self._run_cli(["run", "hi", "--dir", str(self.tempdir)])
+        self.assertEqual(code, 0)
+        self.assertEqual(gw.call_args.args[2], "deepseek-v4-pro")
+        self.assertEqual(gw.call_args.args[0], config.model_base_url("deepseek-v4-pro"))
+
+        with mock.patch("harness.cli.Gateway", return_value=gateway) as gw2, mock.patch(
+            "harness.cli.AgentLoop", FakeAgentLoop
+        ):
+            code, _, _ = self._run_cli(
+                ["run", "hi", "--model", "kimi-k2.5", "--dir", str(self.tempdir)]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(gw2.call_args.args[2], "kimi-k2.5")
 
     def test_run_agent_flag_reaches_loop(self):
         """--agent Arjuna resolves from the seeded defaults and reaches the

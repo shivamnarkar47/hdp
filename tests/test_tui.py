@@ -38,6 +38,7 @@ from harness.tui import (
     AskTextArea,
     ConnectScreen,
     HarnessTui,
+    ModelsScreen,
     SessionsScreen,
 )
 
@@ -1147,6 +1148,75 @@ class TestTui(unittest.TestCase):
                     await pilot.pause()
                     self.assertEqual(len(app.query(".diagram-box")), 0)
                     self.assertEqual(run.call_count, 1)  # only the first turn
+
+        asyncio.run(flow())
+
+    def test_models_popup_switches_and_persists(self):
+        """/models lists the catalog sorted free-first with prices; Enter on a
+        free model switches, persists it as the default, and rebuilds the
+        gateway onto the free endpoint."""
+        class FlashGateway(FakeGateway):
+            def __init__(self, *scripts):
+                super().__init__(*scripts)
+                self.model_id = "deepseek-v4-flash"
+
+        async def flow() -> None:
+            app = HarnessTui(
+                gateway=FlashGateway([("done", "stop")]),
+                memory_root=self.root / ".agent-memory",
+                project_dir=self.root,
+            )
+            async with app.run_test() as pilot:
+                prompt = app.query_one("#prompt", TextArea)
+                prompt.text = "/models"
+                prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ModelsScreen)
+                list_view = app.screen.query_one("#model-list", ListView)
+                self.assertEqual(len(list_view.children), len(config.MODELS))
+                first = str(list_view.children[0].query_one(Label).render())
+                self.assertIn("DeepSeek V4 Flash (Free)", first)
+                rows = " ".join(
+                    str(item.query_one(Label).render()) for item in list_view.children
+                )
+                self.assertIn("free", rows.lower())
+                # The active (default) row is marked ✓.
+                active_idx = config.MODELS.index(
+                    next(m for m in config.MODELS if m["id"] == app.model_id)
+                )
+                active = str(list_view.children[active_idx].query_one(Label).render())
+                self.assertTrue(active.startswith("✓"))
+                # Switch to the free flash tier (index 0).
+                list_view.index = 0
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app.model_id, "deepseek-v4-flash-free")
+                self.assertEqual(config.load_user_model(), "deepseek-v4-flash-free")
+                self.assertEqual(app.gateway.base_url, config.FREE_BASE_URL)
+                transcript = "\n".join(app.transcript)
+                self.assertIn("model: deepseek-v4-flash-free (free)", transcript)
+
+        asyncio.run(flow())
+
+    def test_saved_model_is_startup_default(self):
+        """A saved default model is what the TUI builds its gateway with."""
+        config.save_user_model("deepseek-v4-pro")
+
+        async def flow() -> None:
+            fake_gateway = FakeGateway([("done", "stop")])
+            fake_gateway.model_id = "deepseek-v4-pro"
+            with mock.patch("harness.tui.Gateway", return_value=fake_gateway) as gw:
+                app = HarnessTui(
+                    memory_root=self.root / ".agent-memory", project_dir=self.root
+                )
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+            self.assertEqual(gw.call_args.args[2], "deepseek-v4-pro")
+            self.assertEqual(gw.call_args.args[0], config.model_base_url("deepseek-v4-pro"))
+            self.assertEqual(app.model_id, "deepseek-v4-pro")
 
         asyncio.run(flow())
 

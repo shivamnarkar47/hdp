@@ -335,7 +335,8 @@ def _run_one(
         allow_dangerous=args.allow_dangerous,
         cache=cache,
     )
-    gateway = Gateway(config.BASE_URL, key, args.model or config.MODEL_ID)
+    model_id = config.resolve_model_id(args.model)
+    gateway = Gateway(config.model_base_url(model_id), key, model_id)
     loop = AgentLoop(
         gateway,
         tools,
@@ -375,9 +376,10 @@ def _run_one(
             "session_id": session_id, "error": str(exc), "error_kind": "gateway"
         }
     else:
-        record = {
+        return {
             "session_id": session_id,
             "answer": answer,
+            "model": getattr(gateway, "model_id", None),
             # getattr defaults keep minimal loop stubs (flag-plumbing tests)
             # working; a real AgentLoop always exposes these.
             "steps": getattr(loop, "steps", 0),
@@ -403,7 +405,9 @@ def _public_record(record: dict) -> dict:
     if usage:
         public["cost"] = round(
             config.estimate_cost(
-                usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+                model_id=record.get("model"),
             ),
             6,
         )
